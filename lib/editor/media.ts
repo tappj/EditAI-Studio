@@ -1,0 +1,622 @@
+import type { FFmpeg } from "@ffmpeg/ffmpeg";
+import type { Document, Source, TextLayer } from "./model";
+import { atTime, duration, cssFilter, textTiming } from "./model";
+let instance: FFmpeg | undefined;
+let loading: Promise<FFmpeg> | undefined;
+export async function ffmpeg() {
+  if (instance?.loaded) return instance;
+  if (!loading)
+    loading = (async () => {
+      const { FFmpeg } = await import("@ffmpeg/ffmpeg");
+      const f = new FFmpeg();
+      const chunks = await Promise.all(
+        [1, 2].map(async (i) => {
+          const r = await fetch("/ffmpeg/core-part-" + i + ".bin");
+          if (!r.ok)
+            throw Error(
+              "The video engine could not download. Check your connection and retry.",
+            );
+          return r.arrayBuffer();
+        }),
+      );
+      const wasmURL = URL.createObjectURL(
+        new Blob(chunks, { type: "application/wasm" }),
+      );
+      try {
+        await f.load({
+          classWorkerURL: "/ffmpeg/worker.js",
+          coreURL: location.origin + "/ffmpeg/ffmpeg-core.js",
+          wasmURL,
+        });
+      } finally {
+        URL.revokeObjectURL(wasmURL);
+      }
+      instance = f;
+      return f;
+    })().catch((e) => {
+      loading = undefined;
+      throw e;
+    });
+  return loading;
+}
+export function cancelFFmpeg() {
+  instance?.terminate();
+  instance = undefined;
+  loading = undefined;
+}
+export async function extractAudio(blob: Blob, start: number, length: number) {
+  const f = await ffmpeg(),
+    name = "audio-source-" + crypto.randomUUID();
+  const out = name + ".wav";
+  try {
+    await f.writeFile(name, new Uint8Array(await blob.arrayBuffer()));
+    const status = await f.exec([
+      "-ss",
+      String(start),
+      "-i",
+      name,
+      "-t",
+      String(length),
+      "-vn",
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-c:a",
+      "pcm_s16le",
+      out,
+    ]);
+    if (status !== 0)
+      throw Error(
+        "This video has no readable audio track, or its codec is unsupported.",
+      );
+    const data = await f.readFile(out);
+    return new Blob([new Uint8Array(data as Uint8Array)], {
+      type: "audio/wav",
+    });
+  } finally {
+    await f.deleteFile(name).catch(() => {});
+    await f.deleteFile(out).catch(() => {});
+  }
+}
+export async function toMP4(blob: Blob, progress: (n: number) => void) {
+  const f = await ffmpeg();
+  const id = crypto.randomUUID();
+  const input = id + ".webm",
+    output = id + ".mp4";
+  const cb = ({ progress: p }: { progress: number }) =>
+    progress(Math.min(0.99, Math.max(0, p)));
+  f.on("progress", cb);
+  try {
+    await f.writeFile(input, new Uint8Array(await blob.arrayBuffer()));
+    if (
+      (await f.exec([
+        "-i",
+        input,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        output,
+      ])) !== 0
+    )
+      throw Error(
+        "MP4 encoding failed. Your edit is saved; try a smaller resolution.",
+      );
+    const b = await f.readFile(output);
+    return new Blob([new Uint8Array(b as Uint8Array)], { type: "video/mp4" });
+  } finally {
+    f.off("progress", cb);
+    await f.deleteFile(input).catch(() => {});
+    await f.deleteFile(output).catch(() => {});
+  }
+}
+export async function probe(file: File): Promise<Source> {
+  if (file.size > 1024 * 1024 * 1024)
+    throw Error("Choose media smaller than 1 GB.");
+  const kind = file.type.startsWith("audio/")
+    ? "audio"
+    : file.type.startsWith("image/")
+      ? "image"
+      : "video";
+  if (kind === "image") {
+    const b = await createImageBitmap(file);
+    return {
+      id: crypto.randomUUID(),
+      name: file.name,
+      duration: 10,
+      width: b.width,
+      height: b.height,
+      kind,
+      mime: file.type,
+    };
+  }
+  const el = document.createElement(kind === "audio" ? "audio" : "video");
+  const url = URL.createObjectURL(file);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () =>
+          reject(Error("Media could not be opened. Try MP4 (H.264) or WebM.")),
+        15000,
+      );
+      el.onloadedmetadata = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      el.onerror = () => {
+        clearTimeout(timer);
+        reject(
+          Error(
+            "This browser cannot decode this file. Try MP4 (H.264) or WebM.",
+          ),
+        );
+      };
+      el.src = url;
+    });
+    if (!Number.isFinite(el.duration) || el.duration <= 0 || el.duration > 1800)
+      throw Error("Choose a video up to 30 minutes long.");
+    return {
+      id: crypto.randomUUID(),
+      name: file.name,
+      duration: el.duration,
+      width: kind === "video" ? (el as HTMLVideoElement).videoWidth : 0,
+      height: kind === "video" ? (el as HTMLVideoElement).videoHeight : 0,
+      kind,
+      mime: file.type || "video/mp4",
+    };
+  } finally {
+    el.removeAttribute("src");
+    el.load();
+    URL.revokeObjectURL(url);
+  }
+}
+export function canvasSize(doc: Document, longest = 1280) {
+  const src = doc.sources[doc.segments[0]?.sourceIndex],
+    ratio =
+      doc.canvas === "9:16"
+        ? 9 / 16
+        : doc.canvas === "16:9"
+          ? 16 / 9
+          : doc.canvas === "1:1"
+            ? 1
+            : (src?.width || 16) / (src?.height || 9);
+  return {
+    width: Math.round((ratio >= 1 ? longest : longest * ratio) / 2) * 2,
+    height: Math.round((ratio >= 1 ? longest / ratio : longest) / 2) * 2,
+  };
+}
+function drawText(
+  ctx: CanvasRenderingContext2D,
+  t: TextLayer,
+  time: number,
+  w: number,
+  h: number,
+  start: number,
+  end: number,
+) {
+  ctx.save();
+  const phase = Math.min(
+    1,
+    Math.max(0, Math.min(time - start, end - time) / 0.25),
+  );
+  ctx.globalAlpha = t.animation === "fade" ? phase : 1;
+  ctx.translate(t.x * w, t.y * h);
+  if (t.animation === "pop" || t.animation === "zoom") {
+    const scale = 0.8 + 0.2 * (1 - (1 - phase) ** 3);
+    ctx.scale(scale, scale);
+  }
+  if (t.animation === "slide") ctx.translate(0, (1 - phase) * h * 0.03);
+  const size = t.size * w;
+  ctx.font = `600 ${size}px "${t.font}"`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  let text = t.text;
+  if (t.animation === "typewriter")
+    text = text.slice(
+      0,
+      Math.ceil(text.length * Math.min(1, (time - start) / 0.5)),
+    );
+  const lines: string[] = [];
+  for (const p of text.split("\n")) {
+    let line = "";
+    for (const word of p.split(" ")) {
+      if (line && ctx.measureText(line + " " + word).width > w * 0.86) {
+        lines.push(line);
+        line = word;
+      } else line += (line ? " " : "") + word;
+    }
+    lines.push(line);
+  }
+  lines.forEach((line, i) => {
+    const y = (i - (lines.length - 1) / 2) * size * 1.2;
+    if (t.background !== "transparent") {
+      ctx.fillStyle = t.background;
+      const mw = ctx.measureText(line).width;
+      ctx.fillRect(
+        -mw / 2 - size * 0.25,
+        y - size * 0.6,
+        mw + size * 0.5,
+        size * 1.2,
+      );
+    }
+    if (t.outline) {
+      ctx.strokeStyle = "#000000";
+      ctx.lineWidth = Math.max(2, w * 0.00495);
+      ctx.lineJoin = "round";
+      ctx.strokeText(line, 0, y);
+    }
+    ctx.fillStyle = t.color;
+    ctx.fillText(line, 0, y);
+  });
+  ctx.restore();
+}
+export class Player {
+  canvas: HTMLCanvasElement;
+  doc: Document;
+  urls: Record<string, string>;
+  videos = new Map<number, HTMLVideoElement | HTMLAudioElement>();
+  images = new Map<number, HTMLImageElement>();
+  ctx: AudioContext | null = null;
+  dest: MediaStreamAudioDestinationNode | null = null;
+  nodes = new Map<number, GainNode>();
+  playing = false;
+  time = 0;
+  frame = 0;
+  last = 0;
+  onTime: (t: number) => void;
+  onEnd?: () => void;
+  onError?: (s: string) => void;
+  exporting = false;
+  constructor(
+    canvas: HTMLCanvasElement,
+    doc: Document,
+    urls: Record<string, string>,
+    onTime: (t: number) => void,
+  ) {
+    this.canvas = canvas;
+    this.doc = doc;
+    this.urls = urls;
+    this.onTime = onTime;
+  }
+  async init() {
+    for (let i = 0; i < this.doc.sources.length; i++) {
+      const s = this.doc.sources[i],
+        url = this.urls[s.id];
+      if (!url) continue;
+      if (s.kind === "image") {
+        if (!this.images.has(i)) {
+          const img = new Image();
+          img.src = url;
+          await img.decode().catch(() => {});
+          this.images.set(i, img);
+        }
+        continue;
+      }
+      if (!this.videos.has(i)) {
+        const v = document.createElement(
+          s.kind === "audio" ? "audio" : "video",
+        );
+        v.preload = "auto";
+        if (v instanceof HTMLVideoElement) v.playsInline = true;
+        v.src = url;
+        v.onerror = () =>
+          this.onError?.("This browser could not decode the selected video.");
+        this.videos.set(i, v);
+        await new Promise<void>((r) => {
+          if (v.readyState >= 2) return r();
+          v.onloadeddata = () => r();
+          setTimeout(r, 10000);
+        });
+      }
+    }
+    await Promise.all(
+      ["TikTok Sans", "Inter", "Montserrat", "Poppins"].map((f) =>
+        document.fonts.load(`600 30px "${f}"`).catch(() => {}),
+      ),
+    );
+    this.draw();
+  }
+  audio() {
+    if (!this.ctx) {
+      this.ctx = new AudioContext();
+      this.dest = this.ctx.createMediaStreamDestination();
+    }
+    for (const [i, v] of this.videos) {
+      if (!this.nodes.has(i)) {
+        const gain = this.ctx.createGain();
+        this.ctx.createMediaElementSource(v).connect(gain);
+        gain.connect(this.ctx.destination);
+        gain.connect(this.dest!);
+        this.nodes.set(i, gain);
+      }
+    }
+    void this.ctx.resume();
+  }
+  sync() {
+    const at = atTime(this.doc, this.time);
+    const active = new Map<
+      number,
+      { t: number; speed: number; volume: number }
+    >();
+    if (at)
+      active.set(at.segment.sourceIndex, {
+        t: at.sourceTime,
+        speed: at.segment.speed,
+        volume: at.segment.volume,
+      });
+    for (const a of this.doc.audio) {
+      if (this.time >= a.start && this.time < a.end) {
+        const fade = Math.min(
+          1,
+          a.fadeIn ? (this.time - a.start) / a.fadeIn : 1,
+          a.fadeOut ? (a.end - this.time) / a.fadeOut : 1,
+        );
+        active.set(a.sourceIndex, {
+          t: a.sourceStart + this.time - a.start,
+          speed: 1,
+          volume: a.volume * Math.max(0, fade),
+        });
+      }
+    }
+    for (const o of this.doc.overlays) {
+      if (
+        this.time >= o.start &&
+        this.time < o.end &&
+        !active.has(o.sourceIndex)
+      )
+        active.set(o.sourceIndex, {
+          t: o.sourceStart + this.time - o.start,
+          speed: 1,
+          volume: 0,
+        });
+    }
+    for (const [i, v] of this.videos) {
+      const a = active.get(i);
+      if (!a) {
+        v.pause();
+        const gain = this.nodes.get(i);
+        if (gain) gain.gain.value = 0;
+        continue;
+      }
+      if (Math.abs(v.currentTime - a.t) > 0.15)
+        v.currentTime = Math.max(0, a.t);
+      v.playbackRate = a.speed;
+      const gain = this.nodes.get(i);
+      if (gain) gain.gain.value = a.volume;
+      else v.volume = a.volume;
+      if (this.playing) {
+        if (v.paused) void v.play().catch(() => {});
+      } else v.pause();
+    }
+  }
+  draw() {
+    const ctx = this.canvas.getContext("2d");
+    if (!ctx) return;
+    const w = this.canvas.width,
+      h = this.canvas.height;
+    ctx.fillStyle = "#101216";
+    ctx.fillRect(0, 0, w, h);
+    const at = atTime(this.doc, this.time);
+    if (at) {
+      const s = at.segment,
+        src = this.doc.sources[s.sourceIndex],
+        v = this.videos.get(s.sourceIndex);
+      if (v instanceof HTMLVideoElement && v.readyState >= 2) {
+        const a = s.appearance,
+          c = a.crop;
+        ctx.save();
+        ctx.filter = cssFilter(a);
+        ctx.globalAlpha = a.opacity;
+        ctx.translate(w / 2, h / 2);
+        ctx.rotate((a.rotation * Math.PI) / 2);
+        ctx.scale(a.flipX ? -1 : 1, a.flipY ? -1 : 1);
+        const vw = src.width * c.width,
+          vh = src.height * c.height,
+          rot = a.rotation % 2,
+          spaceW = rot ? h : w,
+          spaceH = rot ? w : h,
+          scale =
+            this.doc.framing === "fill"
+              ? Math.max(spaceW / vw, spaceH / vh)
+              : Math.min(spaceW / vw, spaceH / vh);
+        ctx.drawImage(
+          v,
+          src.width * c.x,
+          src.height * c.y,
+          vw,
+          vh,
+          (-vw * scale) / 2,
+          (-vh * scale) / 2,
+          vw * scale,
+          vh * scale,
+        );
+        ctx.restore();
+      }
+    }
+    for (const o of this.doc.overlays) {
+      if (this.time < o.start || this.time >= o.end) continue;
+      const media =
+          this.images.get(o.sourceIndex) || this.videos.get(o.sourceIndex),
+        s = this.doc.sources[o.sourceIndex];
+      if (
+        media &&
+        (media instanceof HTMLImageElement ||
+          (media instanceof HTMLVideoElement && media.readyState >= 2))
+      ) {
+        const ow = o.width * w,
+          oh = (ow * s.height) / s.width;
+        ctx.save();
+        ctx.globalAlpha = o.opacity;
+        ctx.drawImage(
+          media as CanvasImageSource,
+          o.x * w - ow / 2,
+          o.y * h - oh / 2,
+          ow,
+          oh,
+        );
+        ctx.restore();
+      }
+    }
+    for (const t of this.doc.texts) {
+      const timing = textTiming(this.doc, t);
+      if (this.time >= timing.start && this.time < timing.end)
+        drawText(ctx, t, this.time, w, h, timing.start, timing.end);
+    }
+  }
+  seek(time: number) {
+    this.time = Math.max(0, Math.min(duration(this.doc), time));
+    this.sync();
+    this.draw();
+    this.onTime(this.time);
+    setTimeout(() => this.draw(), 80);
+  }
+  play() {
+    this.audio();
+    this.playing = true;
+    this.last = performance.now();
+    const tick = (now: number) => {
+      if (!this.playing) return;
+      this.time = Math.min(
+        duration(this.doc),
+        this.time + (now - this.last) / 1000,
+      );
+      this.last = now;
+      this.sync();
+      this.draw();
+      this.onTime(this.time);
+      if (this.time >= duration(this.doc)) {
+        this.pause();
+        this.onEnd?.();
+        return;
+      }
+      this.frame = requestAnimationFrame(tick);
+    };
+    this.sync();
+    this.frame = requestAnimationFrame(tick);
+  }
+  pause() {
+    this.playing = false;
+    cancelAnimationFrame(this.frame);
+    for (const v of this.videos.values()) v.pause();
+  }
+  destroy() {
+    this.pause();
+    for (const v of this.videos.values()) {
+      v.removeAttribute("src");
+      v.load();
+    }
+    void this.ctx?.close();
+    this.videos.clear();
+  }
+  async export(
+    fps: number,
+    progress: (n: number) => void,
+    signal: AbortSignal,
+  ) {
+    this.pause();
+    this.audio();
+    this.exporting = true;
+    const oldTime = this.time;
+    this.seek(0);
+    await new Promise((r) => setTimeout(r, 250));
+    const stream = this.canvas.captureStream(fps);
+    for (const t of this.dest!.stream.getAudioTracks()) stream.addTrack(t);
+    const mime = [
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp8,opus",
+      "video/mp4",
+    ].find((m) => MediaRecorder.isTypeSupported(m));
+    if (!mime)
+      throw Error(
+        "This browser cannot record video exports. Try current Chrome or Edge.",
+      );
+    const recorder = new MediaRecorder(stream, {
+      mimeType: mime,
+      videoBitsPerSecond: 8000000,
+    });
+    const chunks: Blob[] = [];
+    const previous = this.onTime;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout>;
+        const stop = () => {
+          this.pause();
+          if (recorder.state !== "inactive") recorder.stop();
+        };
+        signal.addEventListener("abort", stop, { once: true });
+        recorder.ondataavailable = (e) => {
+          if (e.data.size) chunks.push(e.data);
+        };
+        recorder.onerror = () => reject(Error("Video recording failed."));
+        recorder.onstop = () => {
+          clearTimeout(timer);
+          signal.removeEventListener("abort", stop);
+          signal.aborted
+            ? reject(new DOMException("Cancelled", "AbortError"))
+            : resolve();
+        };
+        this.onTime = (t) => {
+          previous(t);
+          progress((t / duration(this.doc)) * 0.75);
+        };
+        this.onEnd = stop;
+        recorder.start(1000);
+        this.play();
+        timer = setTimeout(
+          () => {
+            stop();
+            reject(
+              Error("Export timed out. Keep this tab visible and try again."),
+            );
+          },
+          (duration(this.doc) + 30) * 1000,
+        );
+      });
+      const blob = new Blob(chunks, { type: mime });
+      if (mime.startsWith("video/mp4")) return blob;
+      progress(0.76);
+      return await toMP4(blob, (n) => progress(0.76 + n * 0.24));
+    } finally {
+      this.pause();
+      this.onTime = previous;
+      this.onEnd = undefined;
+      this.exporting = false;
+      this.seek(oldTime);
+      for (const t of stream.getVideoTracks()) t.stop();
+    }
+  }
+}
+
+// MediaRecorder WebM has no duration header. Remux without re-encoding before import.
+export async function normalizeRecording(file: File) {
+  if (!file.type.includes("webm")) return file;
+  const f = await ffmpeg(),
+    id = crypto.randomUUID(),
+    input = id + ".in.webm",
+    output = id + ".out.webm";
+  try {
+    await f.writeFile(input, new Uint8Array(await file.arrayBuffer()));
+    if ((await f.exec(["-i", input, "-c", "copy", output])) !== 0)
+      throw Error(
+        "This recording could not be finalized. Please try recording again.",
+      );
+    const b = await f.readFile(output);
+    return new File([new Uint8Array(b as Uint8Array)], file.name, {
+      type: "video/webm",
+    });
+  } finally {
+    await f.deleteFile(input).catch(() => {});
+    await f.deleteFile(output).catch(() => {});
+  }
+}
