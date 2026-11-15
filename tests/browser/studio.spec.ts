@@ -24,6 +24,14 @@ async function authenticated(page: import("@playwright/test").Page) {
     r.fulfill({ json: { ok: true } }),
   );
 }
+async function openStudio(page: import("@playwright/test").Page) {
+  await page.goto("/");
+  // File inputs exist before the async sign-in gate finishes. Wait for the
+  // visible studio that a real user reaches before choosing their media.
+  await expect(
+    page.getByRole("heading", { name: "What will you create today?" }),
+  ).toBeVisible();
+}
 test("public first page requires Publik sign-in; responsive and no secret exposure", async ({
   page,
 }) => {
@@ -50,10 +58,7 @@ test("real browser upload, split, undo, speed, text, canvas, MP4 export and save
   page,
 }) => {
   await authenticated(page);
-  await page.goto("/");
-  await expect(
-    page.getByRole("heading", { name: "What will you create today?" }),
-  ).toBeVisible();
+  await openStudio(page);
   await page.screenshot({ path: "outputs/studio-home.png", fullPage: true });
   await page
     .locator("input[type=file]")
@@ -121,7 +126,7 @@ test("AI failure preserves timeline and explains recovery", async ({
       },
     }),
   );
-  await page.goto("/");
+  await openStudio(page);
   await page
     .locator("input[type=file]")
     .first()
@@ -141,7 +146,7 @@ test("large local media survives a browser reload and deletion removes its stora
   await page.route("**/api/projects/*", (r) =>
     r.fulfill({ json: { ok: true } }),
   );
-  await page.goto("/");
+  await openStudio(page);
   // Valid short MP4 plus trailing padding crosses the fallback chunk boundary
   // without changing the decoded fixture or requiring a long recording.
   const video = await readFile("outputs/fixture.mp4");
@@ -240,7 +245,7 @@ test("MediaRecorder takes with generated camera source, teleprompter and playabl
       return stream;
     };
   });
-  await page.goto("/");
+  await openStudio(page);
   await page
     .getByRole("button", { name: "Record", exact: true })
     .first()
@@ -271,7 +276,7 @@ test("overlay and imported audio appear in actual exported media", async ({
   page,
 }) => {
   await authenticated(page);
-  await page.goto("/");
+  await openStudio(page);
   await expect(
     page.getByRole("button", { name: "Create a video", exact: true }),
   ).toBeVisible();
@@ -310,7 +315,7 @@ test("batch creates separate persistent editable projects", async ({
   page,
 }) => {
   await authenticated(page);
-  await page.goto("/");
+  await openStudio(page);
   await page.getByRole("button", { name: /Batch edit/ }).click();
   await page
     .locator(".batch-box input")
@@ -391,7 +396,7 @@ test("Publik Chirp upload flow creates one resumable word-timestamp job per sour
       },
     }),
   );
-  await page.goto("/");
+  await openStudio(page);
   await expect(
     page.getByRole("button", { name: "Create a video", exact: true }),
   ).toBeVisible();
@@ -428,7 +433,7 @@ test("visual style references attach actual browser-decoded image frames to chat
       },
     });
   });
-  await page.goto("/");
+  await openStudio(page);
   await expect(
     page.getByRole("button", { name: "Create a video", exact: true }),
   ).toBeVisible();
