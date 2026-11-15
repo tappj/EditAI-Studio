@@ -6,7 +6,7 @@ November 15, 2026. The new app is independently deployed through Sites at https:
 
 `npm run typecheck` and the production Worker build pass. Fifteen model/security tests pass: source-safe split/cut/duplicate and caption anchors; atomic AI operations; crop/audio bounds; overlap-safe quiet-pause evidence; AES-GCM authentication/random IVs; cross-origin request rejection; bounded JSON; safe payment links; nullable Publik account handles; and bounded recovery of a lost one-time install credential.
 
-Nine Playwright browser tests pass against the final production build (16.9 seconds) and previously against deployed version 2:
+Nine Playwright browser tests pass against the final production build (16.9 seconds) and public deployment version 3 (28.3 seconds), source commit `304b59dd9a9a380d77afdd322a7f8f78c813e835`:
 
 1. Public homepage requires the Publik gate; responsive desktop/mobile layout.
 2. Real browser video import, split, undo/redo, GPU exposure adjustment, square canvas, text, real MP4 export, persistent reopen, and mobile editor layout.
