@@ -608,28 +608,73 @@ export class Player {
   ) {
     this.pause();
     this.audio();
-    this.exporting = true;
-    const oldTime = this.time;
-    this.seek(0);
-    await new Promise((r) => setTimeout(r, 250));
-    const stream = this.canvas.captureStream(fps);
-    for (const t of this.dest!.stream.getAudioTracks()) stream.addTrack(t);
-    const mime = [
-      "video/webm;codecs=vp9,opus",
-      "video/webm;codecs=vp8,opus",
-      "video/mp4",
-    ].find((m) => MediaRecorder.isTypeSupported(m));
-    if (!mime)
-      throw Error(
-        "This browser cannot record video exports. Try current Chrome or Edge.",
-      );
-    const recorder = new MediaRecorder(stream, {
-      mimeType: mime,
-      videoBitsPerSecond: 8000000,
-    });
-    const chunks: Blob[] = [];
-    const previous = this.onTime;
+    const ctx = this.ctx as AudioContext & {
+      sinkId?: string | { type: "none" };
+      setSinkId?: (sink: string | { type: "none" }) => Promise<void>;
+    };
+    const oldTime = this.time,
+      previous = this.onTime,
+      oldSink = ctx.sinkId || "";
+    let stream: MediaStream | undefined,
+      changedSink = false;
     try {
+      // A silent output still renders the real audio graph, including our capture
+      // destination, without depending on a working physical speaker device.
+      // https://developer.chrome.com/blog/audiocontext-setsinkid
+      if (ctx.setSinkId) {
+        await ctx
+          .setSinkId({ type: "none" })
+          .then(() => {
+            changedSink = true;
+          })
+          .catch(() => {});
+      }
+      let resumeTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          ctx.resume(),
+          new Promise<never>((_, reject) => {
+            resumeTimer = setTimeout(
+              () =>
+                reject(
+                  Error(
+                    "Your browser's audio engine did not start. Check the audio output device and retry.",
+                  ),
+                ),
+              3000,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(resumeTimer);
+      }
+      const startClock = ctx.currentTime;
+      for (let i = 0; i < 10 && ctx.currentTime <= startClock; i++)
+        await new Promise((r) => setTimeout(r, 100));
+      if (ctx.currentTime <= startClock)
+        throw Error(
+          "Your browser's audio engine stopped. Check the audio output device and retry.",
+        );
+      signal.throwIfAborted();
+      this.exporting = true;
+      this.seek(0);
+      await new Promise((r) => setTimeout(r, 250));
+      stream = this.canvas.captureStream(fps);
+      for (const t of this.dest!.stream.getAudioTracks()) stream.addTrack(t);
+      const mime = [
+        "video/webm;codecs=vp9,opus",
+        "video/webm;codecs=vp8,opus",
+        "video/mp4",
+      ].find((m) => MediaRecorder.isTypeSupported(m));
+      if (!mime)
+        throw Error(
+          "This browser cannot record video exports. Try current Chrome or Edge.",
+        );
+      const recorder = new MediaRecorder(stream, {
+        mimeType: mime,
+        videoBitsPerSecond: 8000000,
+      });
+      const chunks: Blob[] = [];
       await new Promise<void>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout>;
         const stop = () => {
@@ -644,7 +689,10 @@ export class Player {
         recorder.ondataavailable = (e) => {
           if (e.data.size) chunks.push(e.data);
         };
-        recorder.onerror = () => reject(Error("Video recording failed."));
+        recorder.onerror = () => {
+          stop();
+          reject(Error("Video recording failed."));
+        };
         recorder.onstop = () => {
           clearTimeout(timer);
           signal.removeEventListener("abort", stop);
@@ -670,6 +718,10 @@ export class Player {
         );
       });
       const blob = new Blob(chunks, { type: mime });
+      if (!blob.size)
+        throw Error(
+          "The browser produced an empty recording. Check the audio output device and retry.",
+        );
       if (mime.startsWith("video/mp4")) return blob;
       progress(0.76);
       return await toMP4(blob, (n) => progress(0.76 + n * 0.24), fps);
@@ -680,7 +732,8 @@ export class Player {
       this.onFailure = undefined;
       this.exporting = false;
       this.seek(oldTime);
-      for (const t of stream.getVideoTracks()) t.stop();
+      for (const t of stream?.getVideoTracks() || []) t.stop();
+      if (changedSink) await ctx.setSinkId?.(oldSink).catch(() => {});
     }
   }
 }

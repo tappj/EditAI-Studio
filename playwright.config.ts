@@ -9,11 +9,7 @@ export default defineConfig({
     headless: true,
     acceptDownloads: true,
     launchOptions: {
-      args: [
-        "--use-fake-ui-for-media-stream",
-        "--use-fake-device-for-media-stream",
-        "--autoplay-policy=no-user-gesture-required",
-      ],
+      args: ["--autoplay-policy=no-user-gesture-required"],
     },
   },
   workers: 1,

@@ -65,3 +65,55 @@ test("payment recovery links allow only the official HTTPS origin", () => {
   ])
     assert.equal(safePublikURL(url), undefined);
 });
+
+test("a legitimately linked Publik account may have no public handle", async () => {
+  const { walletIdentity } = await import("../lib/server/publik.ts");
+  assert.deepEqual(
+    walletIdentity({
+      claim_state: "claimed",
+      account: { handle: null },
+      key_id: "fixture_key_id",
+    }),
+    { reference: "linked-key:fixture_key_id", scope: "browser" },
+  );
+  assert.throws(
+    () =>
+      walletIdentity({ claim_state: "anonymous", key_id: "fixture_key_id" }),
+    (e: any) => e.status === 401,
+  );
+  assert.deepEqual(
+    walletIdentity({ claim_state: "claimed", account: { handle: "Creator" } }),
+    { reference: "handle:creator", scope: "account" },
+  );
+});
+
+test("a lost one-time install credential recovers once with a fresh install", async () => {
+  const { provision } = await import("../lib/server/publik.ts");
+  const original = globalThis.fetch;
+  const ids: string[] = [];
+  try {
+    globalThis.fetch = (async (_url, init) => {
+      ids.push(JSON.parse(String(init?.body)).install_id);
+      return Response.json(
+        ids.length === 1 ? {} : { key: "fixture credential" },
+        { status: ids.length === 1 ? 200 : 201 },
+      );
+    }) as typeof fetch;
+    const c = await provision("fixture app token", "first-install");
+    assert.equal(ids.length, 2);
+    assert.notEqual(ids[0], ids[1]);
+    assert.equal(c.browser_install_id, ids[1]);
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return Response.json({});
+    }) as typeof fetch;
+    await assert.rejects(
+      provision("fixture app token", "lost"),
+      (e: any) => e.status === 503,
+    );
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = original;
+  }
+});

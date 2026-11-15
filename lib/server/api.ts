@@ -5,6 +5,7 @@ import {
   readWallet,
   gateScreen,
   ensureSignedIn,
+  walletIdentity,
   sendEvent,
   publik,
   safePublikURL,
@@ -20,7 +21,11 @@ import {
   limit,
 } from "./security";
 import { runSelection } from "../ios/editorial.mjs";
-import { compactSummaryInput, validateSummary } from "../ios/summary.mjs";
+import {
+  compactSummaryInput,
+  validateSummary,
+  summarySchema,
+} from "../ios/summary.mjs";
 import {
   chatSchema,
   instructionsForChat,
@@ -75,23 +80,24 @@ async function current(req: Request) {
       .prepare(
         "INSERT INTO sessions (id,install_id,created_at,expires_at,last_event,consent,telemetry) VALUES (?,?,?,?,0,0,1)",
       )
-      .bind(id, install, Date.now(), Date.now() + 30 * 86400000)
+      .bind(id, install, Date.now(), Date.now() + 365 * 86400000)
       .run();
     s = (await db
       .prepare("SELECT * FROM sessions WHERE id=?")
       .bind(id)
       .first<Session>())!;
-    cookie = `${cookieName}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000${new URL(req.url).protocol === "https:" ? "; Secure" : ""}`;
+    cookie = `${cookieName}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=31536000${new URL(req.url).protocol === "https:" ? "; Secure" : ""}`;
   }
   return { db, s, cookie };
 }
 async function credential(db: D1Database, s: Session) {
   if (s.credential) return decrypt(s.credential, secret());
   const c = await provision(env.PUBLIK_APP_TOKEN || "", s.install_id);
+  s.install_id = c.browser_install_id;
   s.credential = await encrypt(c.key, secret());
   await db
-    .prepare("UPDATE sessions SET credential=? WHERE id=?")
-    .bind(s.credential, s.id)
+    .prepare("UPDATE sessions SET credential=?,install_id=? WHERE id=?")
+    .bind(s.credential, s.install_id, s.id)
     .run();
   return c.key;
 }
@@ -113,10 +119,12 @@ async function identified(db: D1Database, s: Session) {
   }
   if (w.claim_state !== "claimed")
     throw new ApiError(401, "Sign in with publik to continue.");
-  const account = w.account?.id || w.account?.handle;
-  if (!account)
-    throw new ApiError(503, "publik has not returned an account identity.");
-  const owner = await hash("publik:" + account);
+  const owner = await bindIdentity(db, s, w);
+  return { key, w, owner };
+}
+async function bindIdentity(db: D1Database, s: Session, w: any) {
+  const identity = walletIdentity(w);
+  const owner = await hash("publik:" + identity.reference);
   if (s.owner !== owner) {
     await db
       .prepare("UPDATE sessions SET owner=? WHERE id=?")
@@ -124,12 +132,7 @@ async function identified(db: D1Database, s: Session) {
       .run();
     s.owner = owner;
   }
-  return { key, w, owner };
-}
-async function ready(db: D1Database, s: Session) {
-  const auth = await identified(db, s);
-  if (!s.choice) throw new ApiError(403, "Choose how to connect AI first.");
-  return auth;
+  return owner;
 }
 function wordsValid(words: any) {
   if (!Array.isArray(words) || !words.length || words.length > 6000)
@@ -320,7 +323,7 @@ export async function api(req: Request) {
         throw e;
       }
       const screen = gateScreen(w, s.choice);
-      if (w.claim_state === "claimed") await identified(db, s);
+      if (w.claim_state === "claimed") await bindIdentity(db, s, w);
       const savedProfile = s.owner
         ? await db
             .prepare("SELECT name,avatar FROM profiles WHERE owner=?")
@@ -335,9 +338,12 @@ export async function api(req: Request) {
             avatar: savedProfile?.avatar || null,
             handle: w.account?.handle || "",
             ownerId: s.owner,
+            identityScope:
+              w.claim_state === "claimed" ? walletIdentity(w).scope : "browser",
             plan: w.plan?.label || "No plan",
             usedPercent: w.used_percent,
             remainingPercent: w.remaining_percent,
+            prepaidRemainingPercent: w.prepaid_remaining_percent,
             resetsAt: w.resets_at,
             aiProviders: w.ai_providers || [],
             choice: s.choice,
@@ -430,7 +436,7 @@ export async function api(req: Request) {
           .run();
       return result({ ok: sent });
     }
-    await ready(db, s);
+    if (!s.choice) throw new ApiError(403, "Choose how to connect AI first.");
     if (path === "projects" && req.method === "GET")
       return result({
         projects: (
@@ -624,7 +630,85 @@ export async function api(req: Request) {
         url.hostname !== "storage.googleapis.com"
       )
         throw new ApiError(502, "publik returned an unexpected upload host.");
-      return result({ id: upload.id, uploadURL: url.href });
+      const uploadTicket = await encrypt(
+        JSON.stringify({
+          owner,
+          url: url.href,
+          bytes: b.bytes,
+          expires: Date.now() + 600000,
+        }),
+        secret(),
+      );
+      return result({ id: upload.id, uploadTicket });
+    }
+    if (path === "ai/audio-put" && req.method === "PUT") {
+      if (!s.consent || s.choice !== "publik")
+        throw new ApiError(
+          403,
+          "Connect publik and allow AI processing first.",
+        );
+      const ticket = req.headers.get("x-upload-ticket") || "";
+      if (!ticket || ticket.length > 12000)
+        throw new ApiError(400, "Audio upload permission is missing.");
+      let upload;
+      try {
+        upload = JSON.parse(await decrypt(ticket, secret()));
+      } catch {
+        throw new ApiError(403, "Audio upload permission is invalid.");
+      }
+      const url = new URL(upload.url);
+      if (
+        upload.owner !== owner ||
+        upload.expires < Date.now() ||
+        url.protocol !== "https:" ||
+        url.hostname !== "storage.googleapis.com" ||
+        !Number.isInteger(upload.bytes) ||
+        upload.bytes < 44 ||
+        upload.bytes > 32 * 1024 * 1024
+      )
+        throw new ApiError(
+          403,
+          "Audio upload permission expired. Retry transcription.",
+        );
+      if (!req.body || req.headers.get("content-type") !== "audio/wav")
+        throw new ApiError(400, "Choose WAV audio for transcription.");
+      const declared = req.headers.get("content-length");
+      if (declared && Number(declared) !== upload.bytes)
+        throw new ApiError(
+          400,
+          "Audio upload size changed. Retry transcription.",
+        );
+      let bytes = 0;
+      const bounded = req.body.pipeThrough(
+        new TransformStream<Uint8Array, Uint8Array>({
+          transform(chunk, controller) {
+            bytes += chunk.byteLength;
+            if (bytes > upload.bytes)
+              throw new Error("Audio upload exceeded its size.");
+            controller.enqueue(chunk);
+          },
+          flush() {
+            if (bytes !== upload.bytes)
+              throw new Error("Audio upload was incomplete.");
+          },
+        }),
+      );
+      // Google's signed upload endpoint does not allow browser CORS. Stream the
+      // bounded body through this authenticated Worker; never buffer a whole video.
+      const sent = await fetch(url, {
+        method: "PUT",
+        headers: { "content-type": "audio/wav" },
+        body: bounded.pipeThrough(new FixedLengthStream(upload.bytes)),
+        redirect: "manual",
+        signal: AbortSignal.any([req.signal, AbortSignal.timeout(120000)]),
+      });
+      if (!sent.ok)
+        throw new ApiError(
+          502,
+          "Audio upload failed. Retry; your original video was kept.",
+        );
+      await sent.body?.cancel();
+      return result({ ok: true });
     }
     if (path.startsWith("ai/speech-source/") && req.method === "GET") {
       const sourceId = path.split("/").at(-1)!;
@@ -830,21 +914,25 @@ export async function api(req: Request) {
       }
       if (path === "ai/summary") {
         wordsValid(b.words);
-        return result(
-          validateSummary(
-            await model(
-              db,
-              s,
-              owner,
-              key,
-              "Summarize this video. Return exactly {summary,hook,highlights}. Summary <=500 characters, hook assessment <=350, 1–3 timestamped highlights each <=220.",
-              compactSummaryInput(b.words),
-              undefined,
-              1200,
-              req.signal,
-            ),
-          ),
+        const answer = await model(
+          db,
+          s,
+          owner,
+          key,
+          'Summarize this video. Return exactly this JSON shape: {"summary":"main point","hook":"assessment of the opening hook","highlights":["00:00 highlight"]}. Use the literal keys summary, hook and highlights. Summary <=350 characters, hook <=250, 1–3 timestamped plain text highlights each <=150. No other keys.',
+          compactSummaryInput(b.words),
+          summarySchema,
+          650,
+          req.signal,
         );
+        try {
+          return result(validateSummary(answer));
+        } catch {
+          throw new ApiError(
+            502,
+            "The AI summary did not pass validation. Retry; your transcript is saved.",
+          );
+        }
       }
       if (path === "ai/chat") {
         if (

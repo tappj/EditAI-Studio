@@ -81,7 +81,15 @@ test("real browser upload, split, undo, speed, text, canvas, MP4 export and save
     .selectOption("854");
   const download = page.waitForEvent("download", { timeout: 150000 });
   await page.getByRole("button", { name: "Export video", exact: true }).click();
-  const file = await download;
+  const file = await Promise.race([
+    download,
+    page
+      .getByRole("alert")
+      .waitFor({ timeout: 150000 })
+      .then(async () => {
+        throw Error(await page.getByRole("alert").innerText());
+      }),
+  ]);
   await file.saveAs("outputs/verified-export.mp4");
   await expect(page.getByRole("status")).toContainText("MP4 exported");
   await page
@@ -143,7 +151,9 @@ test("MediaRecorder takes with generated camera source, teleprompter and playabl
         ctx.fillRect(0, 0, 320, 180);
       }, 50);
       const stream = c.captureStream(24);
-      const audio = new AudioContext(),
+      const audio = new AudioContext({
+          sinkId: { type: "none" },
+        } as AudioContextOptions),
         osc = audio.createOscillator(),
         dest = audio.createMediaStreamDestination();
       osc.connect(dest);
@@ -275,17 +285,17 @@ test("Publik Chirp upload flow creates one resumable word-timestamp job per sour
     return r.fulfill({
       json: {
         id: "upl_fixture",
-        uploadURL: "https://storage.googleapis.com/editai-test-fixture",
+        uploadTicket: "encrypted-fixture-ticket",
       },
     });
   });
-  await page.route(
-    "https://storage.googleapis.com/editai-test-fixture",
-    async (r) => {
-      expect(r.request().headers()["authorization"]).toBeUndefined();
-      await r.fulfill({ status: 200, body: "" });
-    },
-  );
+  await page.route("**/api/ai/audio-put", async (r) => {
+    expect(r.request().headers()["authorization"]).toBeUndefined();
+    expect(r.request().headers()["x-upload-ticket"]).toBe(
+      "encrypted-fixture-ticket",
+    );
+    await r.fulfill({ status: 200, body: "" });
+  });
   await page.route("**/api/ai/transcription-job", (r) => {
     jobs++;
     expect(r.request().postDataJSON().sourceId).toBeTruthy();

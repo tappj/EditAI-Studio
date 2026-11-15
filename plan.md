@@ -8,15 +8,16 @@ React/TypeScript with Vinext App Router, Cloudflare Worker via Sites; D1/R2 for 
 ## Tasks
 - [x] Audit iOS features/design/algorithms, fellowship handbook and Publik docs.
 - [x] Create independent project and hosting identity; preserve older projects.
-- [ ] Approve hosted-web listing, device authorization, mint server token.
-- [ ] Multi-source import, recording/teleprompter, batch, persistent library.
-- [ ] Timeline split/trim/reorder/duplicate/delete, speed/volume, crop/filters/history.
-- [ ] Captions/text, video/image overlays, audio lanes.
-- [ ] Publik transcription, full-recording editorial selection, summary, editor chat.
-- [ ] Matching playback and MP4 export.
-- [ ] Settings/profile/consent/privacy/deletion and resilient errors.
-- [ ] Algorithm/security tests; real browser upload/edit/export and AI tests.
-- [ ] Deploy, verify live flows, publish Publik listing, document differences.
+- [x] Approve hosted-web listing, device authorization, mint server token (catalog held for Publik review).
+- [x] Multi-source import, recording/teleprompter, batch, persistent library.
+- [x] Timeline split/trim/reorder/duplicate/delete, speed/volume, crop/filters/history.
+- [x] Captions/text, video/image overlays, audio lanes.
+- [x] Publik transcription, full-recording editorial selection, summary, editor chat (real provider tests passed).
+- [x] Matching playback and MP4 export.
+- [x] Settings/profile/consent/privacy/deletion and resilient errors.
+- [x] Algorithm/security tests; real browser upload/edit/export and AI tests (see verification boundaries).
+- [x] Deploy the independent web app and document parity/validation.
+- [ ] Final publication/regression checks and Publik catalog review.
 
 ## Fellowship
 Nov 9–Dec 15, 2026. Sunday check-ins Nov 15/22/29, Dec 6/13; no automation requested. WAU requires 25 min in a day or use on two days. Owner/bot/extra-account use excluded. Compute is eligible paying-user spend. Only official app_opened/active_session telemetry during actual use. Credits expire Dec 31; wallet must confirm available grants.
@@ -25,4 +26,11 @@ Nov 9–Dec 15, 2026. Sunday check-ins Nov 15/22/29, Dec 6/13; no automation req
 Publik checklist and browser approvals mandatory before integration/publication. Hosted web has no binary release and requires sign-in gate before application. Browser exports cannot promise AVFoundation HDR/VFR fidelity; measure memory limits. Apple IAP/DeviceCheck/Photos/camera torch require web alternatives. Domain purchase requires approval. No functionality claimed complete until verified.
 
 ## Validation
-Implementation in progress; results will be recorded here.
+TypeScript and production builds pass; fifteen model/security tests and nine fixture browser tests. Actual H.264/AAC export inspected with FFprobe. Live hosted app and database deployed. Real linked Publik chat returned 200; Chirp returned 51 timed words. Real backend browser authentication/consent/transcription/captions/chat and real server summary/editorial review pass. Google upload CORS is handled with a bounded authenticated streaming proxy. See docs/VERIFICATION.md and docs/WEB-PARITY.md for evidence and limits.
+
+## Outstanding
+- Publish the final integration fixes and run the deployed regression suite.
+- Publik catalog is held for their review.
+- No domain purchased: editai.com is registered; geteditai.com is a candidate pending registrar confirmation.
+- Physical camera/microphone and Safari/iOS-browser checks remain manual.
+- Publik wallets without a public account identifier use verified linked-key storage scope, disclosed in Settings; cross-browser account sync cannot be promised for these accounts.

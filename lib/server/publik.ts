@@ -13,7 +13,11 @@ export class ApiError extends Error {
   status: number;
   url?: string;
   constructor(status: number, message: string, url?: string) {
-    super(message);
+    super(
+      String(message)
+        .replace(/\b(?:pat_|pk_|pbt_|sk-)[A-Za-z0-9_.-]+/g, "[redacted]")
+        .slice(0, 1000),
+    );
     this.status = status;
     this.url = url;
   }
@@ -58,7 +62,11 @@ export function safePublikURL(s: unknown): string | undefined {
     return undefined;
   }
 }
-export async function provision(token: string, installId: string) {
+export async function provision(
+  token: string,
+  installId: string,
+  attempt = 0,
+): Promise<any> {
   if (!token)
     throw new ApiError(
       503,
@@ -80,12 +88,16 @@ export async function provision(token: string, installId: string) {
     }),
   });
   const b: any = await r.json().catch(() => ({}));
+  // Installs only return their secret once. Recover a lost/revoked credential
+  // with a fresh install, as the official module does; never loop indefinitely.
+  if (r.status === 200 && !b.key && attempt === 0)
+    return provision(token, crypto.randomUUID(), 1);
   if (!r.ok || !b.key)
     throw new ApiError(
       r.status === 200 ? 503 : r.status,
       b.error?.message || "publik could not set up this browser.",
     );
-  return b;
+  return { ...b, browser_install_id: installId };
 }
 export async function readWallet(key: string) {
   return (await publik("/wallet", key)).body;
@@ -100,7 +112,10 @@ export function gateScreen(w: any, choice: string | null) {
       claimURL: safePublikURL(w.claim_url),
     };
   if (!choice) {
-    const ready = w.plan?.kind !== "none" || w.balance_micros > 0;
+    const ready =
+      !!(w.plan?.kind && w.plan.kind !== "none") ||
+      w.balance_micros > 0 ||
+      w.available_micros > 0;
     return {
       id: "choose",
       title: ready ? "Connect your plan" : "Choose how to pay for AI",
@@ -148,4 +163,27 @@ export async function sendEvent(
 export async function ensureSignedIn(key: string, choice: string | null) {
   const wallet = await readWallet(key);
   return { wallet, screen: gateScreen(wallet, choice) };
+}
+
+export function walletIdentity(w: any): {
+  reference: string;
+  scope: "account" | "browser";
+} {
+  if (w.claim_state !== "claimed")
+    throw new ApiError(401, "Sign in with publik to continue.");
+  if (typeof w.account?.id === "string" && w.account.id)
+    return { reference: "account:" + w.account.id, scope: "account" };
+  if (typeof w.account?.handle === "string" && w.account.handle.trim())
+    return {
+      reference: "handle:" + w.account.handle.trim().toLowerCase(),
+      scope: "account",
+    };
+  // Publik explicitly permits a claimed account with a null public handle. Its
+  // verified key_id is stable for this linked browser; never invent a shared ID.
+  if (typeof w.key_id === "string" && w.key_id)
+    return { reference: "linked-key:" + w.key_id, scope: "browser" };
+  throw new ApiError(
+    503,
+    "publik has not returned this linked browser identity.",
+  );
 }

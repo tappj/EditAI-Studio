@@ -542,7 +542,9 @@ export default function App() {
       if (files.length > 50) throw Error("Choose up to 50 files.");
       const d = newDocument(),
         next = { ...urlsRef.current };
+      const backupFailures: string[] = [];
       for (let i = 0; i < files.length; i++) {
+        activeSignal?.throwIfAborted();
         const f = /^Take \d+\.webm$/.test(files[i].name)
             ? await normalizeRecording(files[i])
             : files[i],
@@ -556,7 +558,13 @@ export default function App() {
         d.segments.push(newSegment(i, s.duration));
         next[s.id] = URL.createObjectURL(f);
         setProgress((i + 1) / files.length);
-        if (cloud) await backup(s.id, f);
+        if (cloud)
+          try {
+            await backup(s.id, f);
+          } catch (e: any) {
+            if (e.name === "AbortError") throw e;
+            backupFailures.push(s.name + ": " + e.message);
+          }
       }
       const p = {
         id: crypto.randomUUID(),
@@ -574,6 +582,10 @@ export default function App() {
       setFuture([]);
       setSummary(null);
       setMessages([]);
+      if (backupFailures.length)
+        setError(
+          "Project saved locally. Cloud backup failed: " + backupFailures[0],
+        );
       setScreen(
         kind === "transcript"
           ? "transcript"
@@ -591,6 +603,7 @@ export default function App() {
         "x-file-name": encodeURIComponent(f instanceof File ? f.name : "Media"),
       },
       body: f,
+      signal: activeSignal,
     });
     if (!r.ok)
       throw Error(((await r.json()) as any).error || "Cloud backup failed.");
@@ -601,7 +614,9 @@ export default function App() {
       const next = { ...urls },
         d = structuredClone(doc);
       for (const f of files) {
+        activeSignal?.throwIfAborted();
         const s = await probe(f);
+        activeSignal?.throwIfAborted();
         await saveMedia(s.id, f);
         next[s.id] = URL.createObjectURL(f);
         const i = d.sources.length;
@@ -720,14 +735,20 @@ export default function App() {
           evidenceAudio = audio;
           activeSignal?.throwIfAborted();
           const upload = await api("ai/audio-upload", { bytes: audio.size });
-          const put = await fetch(upload.uploadURL, {
+          const put = await fetch("/api/ai/audio-put", {
             method: "PUT",
-            headers: { "content-type": "audio/wav" },
+            headers: {
+              "content-type": "audio/wav",
+              "x-upload-ticket": upload.uploadTicket,
+            },
             body: audio,
             signal: activeSignal,
           });
           if (!put.ok)
-            throw Error("Audio upload failed. Your original video was kept.");
+            throw Error(
+              ((await put.json().catch(() => ({}))) as { error?: string })
+                .error || "Audio upload failed. Your original video was kept.",
+            );
           activeSignal?.throwIfAborted();
           const started = await api("ai/transcription-job", {
             uploadId: upload.id,
@@ -2555,7 +2576,12 @@ export default function App() {
                       AI connection
                     </h2>
                     <p>
-                      Connected as <strong>@{session.profile.handle}</strong>
+                      Connected to{" "}
+                      <strong>
+                        {session.profile.handle
+                          ? "@" + session.profile.handle
+                          : "your publik account"}
+                      </strong>
                     </p>
                     <div className="plan-card">
                       <span>{session.profile.plan}</span>
@@ -2568,6 +2594,17 @@ export default function App() {
                           <small>
                             {session.profile.usedPercent}% of this plan period
                             used
+                          </small>
+                        </>
+                      ) : session.profile.prepaidRemainingPercent != null ? (
+                        <>
+                          <progress
+                            value={session.profile.prepaidRemainingPercent}
+                            max={100}
+                          />
+                          <small>
+                            {session.profile.prepaidRemainingPercent}% of
+                            prepaid credits remaining
                           </small>
                         </>
                       ) : (
@@ -2666,9 +2703,11 @@ export default function App() {
                       Projects & storage
                     </h2>
                     <p>
-                      Projects autosave locally and sync their timeline to your
-                      account. Source videos stay on this device unless you
-                      explicitly enable cloud backup.
+                      {session.profile.identityScope === "browser"
+                        ? "Projects autosave for this linked browser. Keep exported project metadata and source files when moving to another browser."
+                        : "Projects autosave locally and sync their timeline to your account."}{" "}
+                      Source videos stay on this device unless you explicitly
+                      enable cloud backup.
                     </p>
                     <Button
                       secondary
