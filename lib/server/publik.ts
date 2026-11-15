@@ -10,12 +10,12 @@ export const MODELS = {
   smart: "publik-smart",
 } as const;
 export class ApiError extends Error {
-  constructor(
-    public status: number,
-    message: string,
-    public url?: string,
-  ) {
+  status: number;
+  url?: string;
+  constructor(status: number, message: string, url?: string) {
     super(message);
+    this.status = status;
+    this.url = url;
   }
 }
 export async function publik(
@@ -48,7 +48,10 @@ export async function publik(
 export function safePublikURL(s: unknown): string | undefined {
   try {
     const u = new URL(String(s));
-    return u.protocol === "https:" && u.hostname === "publikhq.com"
+    return u.protocol === "https:" &&
+      u.hostname === "publikhq.com" &&
+      !u.username &&
+      !u.password
       ? u.href
       : undefined;
   } catch {
@@ -138,4 +141,11 @@ export async function sendEvent(
     }),
   });
   return r.ok;
+}
+
+// Hosted gate: request-scoped credentials replace the desktop module's global file.
+// The initial /api/session request calls this before the client can show its editor.
+export async function ensureSignedIn(key: string, choice: string | null) {
+  const wallet = await readWallet(key);
+  return { wallet, screen: gateScreen(wallet, choice) };
 }

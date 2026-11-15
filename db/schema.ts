@@ -40,3 +40,20 @@ export const usage = sqliteTable("usage", {
   createdAt: integer("created_at").notNull(),
   charge: integer("charge").notNull().default(0),
 });
+
+export const speechJobs = sqliteTable("speech_jobs", {
+  id: text("id").primaryKey(),
+  owner: text("owner").notNull(),
+  sourceId: text("source_id").notNull(),
+  uploadId: text("upload_id").notNull(),
+  jobId: text("job_id"),
+  status: text("status").notNull(),
+  createdAt: integer("created_at").notNull(),
+});
+
+export const profiles = sqliteTable("profiles", {
+  owner: text("owner").primaryKey(),
+  name: text("name").notNull().default(""),
+  avatar: text("avatar"),
+  updatedAt: integer("updated_at").notNull(),
+});

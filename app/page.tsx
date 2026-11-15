@@ -87,6 +87,16 @@ import {
   clearStorage,
   setStorageScope,
 } from "@/lib/editor/storage";
+import { FONTS } from "@/lib/editor/fonts";
+import { makeReference, type Reference } from "@/lib/editor/reference";
+import { ADVANCED_ADJUSTMENTS, POSITIVE_ADJUSTMENTS } from "@/lib/editor/color";
+import { Button, IconButton, Range, Wordmark } from "./components/ui";
+import { ProjectCard } from "./components/ProjectCard";
+import { Recorder } from "./components/Recorder";
+import { Batch } from "./components/Batch";
+import { TextStyleEditor } from "./components/TextStyleEditor";
+import { AppearanceEditor } from "./components/AppearanceEditor";
+import { quietPauses } from "@/lib/editor/audio-evidence";
 type Screen =
   | "home"
   | "library"
@@ -122,102 +132,16 @@ async function api(path: string, body?: unknown, method?: string) {
           ? body
           : JSON.stringify(body),
   });
-  const b: any = await r.json();
+  const b: any = await r.json().catch(() => ({
+    error: "EditAI could not read a server response. Please retry.",
+  }));
   if (!r.ok) {
     const e: any = new Error(b.error || "Request failed.");
     e.url = b.url;
+    e.status = r.status;
     throw e;
   }
   return b;
-}
-function Button({
-  children,
-  onClick,
-  secondary = false,
-  disabled = false,
-  className = "",
-  title,
-}: {
-  children: React.ReactNode;
-  onClick?: () => void;
-  secondary?: boolean;
-  disabled?: boolean;
-  className?: string;
-  title?: string;
-}) {
-  return (
-    <button
-      title={title}
-      className={`${secondary ? "button secondary" : "button"} ${className}`}
-      onClick={onClick}
-      disabled={disabled}
-    >
-      {children}
-    </button>
-  );
-}
-function IconButton({
-  children,
-  onClick,
-  label,
-  disabled = false,
-}: {
-  children: React.ReactNode;
-  onClick?: () => void;
-  label: string;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      className="icon-button"
-      aria-label={label}
-      title={label}
-      onClick={onClick}
-      disabled={disabled}
-    >
-      {children}
-    </button>
-  );
-}
-function Range({
-  label,
-  value,
-  min,
-  max,
-  step = 0.01,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  step?: number;
-  onChange: (n: number) => void;
-}) {
-  return (
-    <label className="range-label">
-      <span>
-        {label}
-        <b>{Number(value.toFixed(2))}</b>
-      </span>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(+e.target.value)}
-      />
-    </label>
-  );
-}
-function Wordmark() {
-  return (
-    <span className="wordmark">
-      Edit<span>AI</span>
-      <span className="wordmark-dot">✦</span>
-    </span>
-  );
 }
 export default function App() {
   const [session, setSession] = useState<any>(null),
@@ -253,9 +177,12 @@ export default function App() {
     [language, setLanguage] = useState("auto"),
     [summary, setSummary] = useState<any>(null),
     [profileName, setProfileName] = useState(""),
+    [avatar, setAvatar] = useState<string | null>(null),
     [privacy, setPrivacy] = useState(false),
     [menu, setMenu] = useState(false),
     [cloud, setCloud] = useState(false);
+  const recordingDirty = useRef(false);
+  const lastPlayheadPaint = useRef(0);
   const input = useRef<HTMLInputElement>(null),
     extraInput = useRef<HTMLInputElement>(null),
     canvas = useRef<HTMLCanvasElement>(null),
@@ -267,10 +194,59 @@ export default function App() {
     mediaKind = useRef("overlay");
   projectRef.current = project;
   urlsRef.current = urls;
+  const [reference, setReference] = useState<Reference | null>(null);
+  const referenceInput = useRef<HTMLInputElement>(null);
+  const avatarInput = useRef<HTMLInputElement>(null);
   const doc = project?.document,
     total = doc ? duration(doc) : 0,
     segment = doc?.segments.find((s) => s.id === selected) || doc?.segments[0],
     textLayer = doc?.texts.find((t) => t.id === selectedText);
+  useEffect(() => {
+    if (!privacy && !exportOpen && !busy) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const timer = setTimeout(() => {
+      const el = document.querySelector(".modal") as HTMLElement | null;
+      if (el) {
+        el.setAttribute("role", "dialog");
+        el.setAttribute("aria-modal", "true");
+        el.tabIndex = -1;
+        el.focus();
+      }
+    }, 0);
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) {
+        setPrivacy(false);
+        setExportOpen(false);
+      }
+      if (e.key === "Tab") {
+        const el = document.querySelector(".modal");
+        const controls = Array.from(
+          el?.querySelectorAll<HTMLElement>(
+            "button:not(:disabled),a,input,select,textarea",
+          ) || [],
+        );
+        if (!controls.length) return;
+        const first = controls[0],
+          last = controls.at(-1)!;
+        if (
+          e.shiftKey &&
+          (document.activeElement === first || document.activeElement === el)
+        ) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener("keydown", key);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("keydown", key);
+      previous?.focus();
+    };
+  }, [privacy, exportOpen, !!busy]);
   const fail = useCallback((e: any) => {
     setError(e.message || String(e));
     setErrorURL(e.url || "");
@@ -282,6 +258,8 @@ export default function App() {
       setGateError("");
       setConsent(s.profile.consent);
       setTelemetry(s.profile.telemetry);
+      setProfileName(s.profile.displayName || "");
+      setAvatar(s.profile.avatar || null);
     } catch (e: any) {
       setGateError(e.message);
     } finally {
@@ -296,7 +274,6 @@ export default function App() {
     } catch {}
     setTheme(p.theme || "system");
     setLanguage(p.language || "auto");
-    setProfileName(p.name || "");
   }, [refresh]);
   useEffect(() => {
     const dark =
@@ -306,7 +283,7 @@ export default function App() {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
     localStorage.setItem(
       "editai-preferences",
-      JSON.stringify({ theme, language, name: profileName }),
+      JSON.stringify({ theme, language }),
     );
   }, [theme, language, profileName]);
   useEffect(() => {
@@ -318,7 +295,7 @@ export default function App() {
   }, [session?.screen.id, refresh]);
   useEffect(() => {
     if (session?.screen.id !== "ready") return;
-    setStorageScope(session.profile.handle);
+    setStorageScope(session.profile.ownerId || session.profile.handle);
     void listProjects().then(setProjects);
     void api("projects")
       .then(async (b) => {
@@ -375,13 +352,22 @@ export default function App() {
     const size = canvasSize(doc, resolution);
     canvas.current.width = size.width;
     canvas.current.height = size.height;
-    const p = new Player(canvas.current, doc, urls, (t) => setPlayhead(t));
+    const p = new Player(canvas.current, doc, urls, (t) => {
+      const now = performance.now();
+      if (!player.current?.playing || now - lastPlayheadPaint.current > 100) {
+        lastPlayheadPaint.current = now;
+        setPlayhead(t);
+      }
+    });
     p.onEnd = () => setPlaying(false);
     p.onError = (s) => setError(s);
     player.current = p;
-    void p.init().then(() => {
-      if (player.current === p) p.seek(p.time);
-    });
+    void p
+      .init()
+      .then(() => {
+        if (player.current === p) p.seek(p.time);
+      })
+      .catch(fail);
     return () => {
       p.destroy();
       player.current = null;
@@ -394,6 +380,10 @@ export default function App() {
     player.current.canvas.width = size.width;
     player.current.canvas.height = size.height;
     player.current.seek(Math.min(playhead, duration(doc)));
+    for (const font of new Set(doc.texts.map((t) => t.font)))
+      void document.fonts
+        .load(`600 30px "${font}"`)
+        .then(() => player.current?.draw());
   }, [doc, resolution]);
   useEffect(() => {
     const fn = (e: KeyboardEvent) => {
@@ -662,9 +652,19 @@ export default function App() {
       change(d);
     });
   }
-  async function ensureWords(d: Document) {
-    if (d.sources.filter((s) => s.kind === "video").every((s) => s.transcribed))
+  async function ensureWords(
+    d: Document,
+    contextProject: Project | null = projectRef.current,
+  ) {
+    if (
+      d.sources.filter((s) => s.kind === "video").every((s) => s.transcribed)
+    ) {
+      if (!d.words.length)
+        throw Error(
+          "No spoken audio was detected. Your footage was preserved.",
+        );
       return d;
+    }
     const out = structuredClone(d),
       words: Word[] = [...d.words];
     for (let i = 0; i < d.sources.length; i++) {
@@ -701,11 +701,23 @@ export default function App() {
           });
         }
       };
+      let evidenceAudio: Blob | undefined;
       if (session.profile.choice === "publik") {
         let jobId = out.sources[i].speechJob;
+        const recovery = await api("ai/speech-source/" + s.id);
+        if (recovery.pending)
+          throw Error(
+            "Your existing transcription is being created. Retry shortly to resume it.",
+          );
+        if (recovery.failed) {
+          await api("ai/speech-reset", { sourceId: s.id });
+          jobId = undefined;
+          delete out.sources[i].speechJob;
+        } else jobId = jobId || recovery.id;
         if (!jobId) {
           setBusy(`Preparing audio · ${s.name}`);
           const audio = await extractAudio(blob, 0, s.duration);
+          evidenceAudio = audio;
           activeSignal?.throwIfAborted();
           const upload = await api("ai/audio-upload", { bytes: audio.size });
           const put = await fetch(upload.uploadURL, {
@@ -719,18 +731,25 @@ export default function App() {
           activeSignal?.throwIfAborted();
           const started = await api("ai/transcription-job", {
             uploadId: upload.id,
+            sourceId: s.id,
             language,
           });
           jobId = started.id;
           out.sources[i].speechJob = jobId;
           // Persist before polling: recovery reads this job instead of starting another paid one.
           out.words = [...words];
-          setProject((p) => (p ? { ...p, document: structuredClone(out) } : p));
-          await saveProject({
-            ...projectRef.current!,
-            document: structuredClone(out),
-            updatedAt: Date.now(),
-          });
+          if (contextProject) {
+            setProject((p) =>
+              p?.id === contextProject.id
+                ? { ...p, document: structuredClone(out) }
+                : p,
+            );
+            await saveProject({
+              ...contextProject,
+              document: structuredClone(out),
+              updatedAt: Date.now(),
+            });
+          }
         }
         for (let attempt = 0; attempt < 90; attempt++) {
           activeSignal?.throwIfAborted();
@@ -738,6 +757,9 @@ export default function App() {
           const job = await api("ai/transcription-job/" + jobId);
           if (job.status === "completed") {
             accept(job.words);
+            evidenceAudio ??= await extractAudio(blob, 0, s.duration);
+            out.quietCuts ??= [];
+            out.quietCuts.push(...(await quietPauses(evidenceAudio, words, i)));
             break;
           }
           if (attempt === 89)
@@ -800,6 +822,8 @@ export default function App() {
               text: w.word,
             });
           }
+          out.quietCuts ??= [];
+          out.quietCuts.push(...(await quietPauses(audio, words, i, start)));
           setProgress(
             (i + Math.min(1, (start + 100) / s.duration)) / d.sources.length,
           );
@@ -808,9 +832,21 @@ export default function App() {
       out.sources[i].transcribed = true;
     }
     words.sort((a, b) => a.clip - b.clip || a.start - b.start);
+    out.words = words;
+    if (contextProject) {
+      setProject((p) =>
+        p?.id === contextProject.id
+          ? { ...p, document: structuredClone(out) }
+          : p,
+      );
+      await saveProject({
+        ...contextProject,
+        document: structuredClone(out),
+        updatedAt: Date.now(),
+      });
+    }
     if (!words.length)
       throw Error("No spoken audio was detected. Your footage was preserved.");
-    out.words = words;
     return out;
   }
   async function transcribe() {
@@ -829,7 +865,7 @@ export default function App() {
       activeSignal?.throwIfAborted();
       const plan = await api("ai/edit", { words: d.words });
       activeSignal?.throwIfAborted();
-      d = applyCuts(d, planCuts(d, plan));
+      d = applyCuts(d, [...planCuts(d, plan), ...(d.quietCuts || [])]);
       change(d);
       setScreen("editor");
       setNotice(
@@ -879,6 +915,7 @@ export default function App() {
         playhead,
         captionFormat: doc.captionFormat,
         supportedOperations,
+        reference,
       };
       const reply = await api("ai/chat", payload);
       let d = doc;
@@ -919,6 +956,8 @@ export default function App() {
     await run("Saving your preferences", async () => {
       await api("settings", {
         ownKey: ownKey || undefined,
+        displayName: profileName,
+        avatar,
         consent,
         telemetry,
       });
@@ -939,9 +978,17 @@ export default function App() {
     setProjects(await listProjects());
   }
   const nav = (s: Screen) => {
+    if (
+      screen === "record" &&
+      recordingDirty.current &&
+      s !== "record" &&
+      !confirm("Discard your recorded takes and leave the recorder?")
+    )
+      return;
     player.current?.pause();
     setPlaying(false);
     setScreen(s);
+    if (s === "settings") void refresh();
     setMenu(false);
   };
   const busyUI = busy && (
@@ -990,6 +1037,53 @@ export default function App() {
         hidden
         onChange={(e) => {
           void addMedia(Array.from(e.target.files || []));
+          e.target.value = "";
+        }}
+      />
+      <input
+        ref={referenceInput}
+        type="file"
+        accept="image/*,video/*"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f)
+            void run("Preparing your style reference", async () =>
+              setReference(await makeReference(f)),
+            );
+          e.target.value = "";
+        }}
+      />
+      <input
+        ref={avatarInput}
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        hidden
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file)
+            void run("Preparing your avatar", async () => {
+              if (file.size > 5 * 1024 * 1024)
+                throw Error("Choose an avatar smaller than 5 MB.");
+              const image = await createImageBitmap(file),
+                c = document.createElement("canvas");
+              c.width = 192;
+              c.height = 192;
+              const size = Math.min(image.width, image.height);
+              c.getContext("2d")!.drawImage(
+                image,
+                (image.width - size) / 2,
+                (image.height - size) / 2,
+                size,
+                size,
+                0,
+                0,
+                192,
+                192,
+              );
+              image.close();
+              setAvatar(c.toDataURL("image/jpeg", 0.8));
+            });
           e.target.value = "";
         }}
       />
@@ -1474,6 +1568,25 @@ export default function App() {
                               </button>
                             ))}
                         </div>
+                        <div className="reference-picker">
+                          <button
+                            className="text-button"
+                            onClick={() => referenceInput.current?.click()}
+                          >
+                            <ImageIcon size={14} />
+                            {reference
+                              ? reference.name
+                              : "Add a style reference"}
+                          </button>
+                          {reference && (
+                            <IconButton
+                              label="Remove reference"
+                              onClick={() => setReference(null)}
+                            >
+                              <X size={13} />
+                            </IconButton>
+                          )}
+                        </div>
                         <form
                           onSubmit={(e) => {
                             e.preventDefault();
@@ -1727,12 +1840,7 @@ export default function App() {
                                 })
                               }
                             >
-                              {[
-                                "TikTok Sans",
-                                "Inter",
-                                "Montserrat",
-                                "Poppins",
-                              ].map((f) => (
+                              {FONTS.map((f) => (
                                 <option key={f}>{f}</option>
                               ))}
                             </select>
@@ -1810,6 +1918,19 @@ export default function App() {
                                 <option key={a}>{a}</option>
                               ))}
                             </select>
+                            <TextStyleEditor
+                              text={textLayer}
+                              timing={textTiming(doc, textLayer)}
+                              total={total}
+                              onChange={(values) =>
+                                patch((d) => {
+                                  Object.assign(
+                                    d.texts.find((t) => t.id === selectedText)!,
+                                    values,
+                                  );
+                                })
+                              }
+                            />
                             <Button
                               secondary
                               onClick={() =>
@@ -1877,6 +1998,19 @@ export default function App() {
                                 }
                               />
                             ))}
+                            <details>
+                              <summary>Overlay appearance</summary>
+                              <AppearanceEditor
+                                value={o.appearance || appearance()}
+                                onChange={(value) =>
+                                  patch((d) => {
+                                    d.overlays.find(
+                                      (x) => x.id === o.id,
+                                    )!.appearance = value;
+                                  })
+                                }
+                              />
+                            </details>
                             <IconButton
                               label="Delete overlay"
                               onClick={() =>
@@ -1897,6 +2031,41 @@ export default function App() {
                               {doc.sources[a.sourceIndex].name} · lane{" "}
                               {a.lane + 1}
                             </strong>
+                            <Range
+                              label="Audio source in"
+                              min={0}
+                              max={Math.max(
+                                0,
+                                doc.sources[a.sourceIndex].duration -
+                                  (a.end - a.start),
+                              )}
+                              value={a.sourceStart}
+                              onChange={(n) =>
+                                patch((d) => {
+                                  d.audio.find(
+                                    (x) => x.id === a.id,
+                                  )!.sourceStart = n;
+                                })
+                              }
+                            />
+                            <label>
+                              Audio lane
+                              <select
+                                value={a.lane}
+                                onChange={(e) =>
+                                  patch((d) => {
+                                    d.audio.find((x) => x.id === a.id)!.lane =
+                                      +e.target.value;
+                                  })
+                                }
+                              >
+                                {[0, 1, 2].map((n) => (
+                                  <option value={n} key={n}>
+                                    Lane {n + 1}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
                             {[
                               ["Start", "start", 0, total],
                               ["End", "end", 0, total],
@@ -1998,124 +2167,14 @@ export default function App() {
                               })
                             }
                           />
-                          <div className="panel-divider" />
-                          <h3>Look & feel</h3>
-                          <div className="filter-grid">
-                            {filters.map((f) => (
-                              <button
-                                key={f}
-                                className={
-                                  segment.appearance.filter === f
-                                    ? "selected"
-                                    : ""
-                                }
-                                onClick={() =>
-                                  updateClip((s) => {
-                                    s.appearance.filter = f;
-                                  })
-                                }
-                              >
-                                {f}
-                              </button>
-                            ))}
-                          </div>
-                          <Range
-                            label="Brightness"
-                            min={-0.8}
-                            max={0.8}
-                            value={segment.appearance.brightness}
-                            onChange={(n) =>
+                          <AppearanceEditor
+                            value={segment.appearance}
+                            onChange={(value) =>
                               updateClip((s) => {
-                                s.appearance.brightness = n;
+                                s.appearance = value;
                               })
                             }
                           />
-                          <Range
-                            label="Contrast"
-                            min={0.2}
-                            max={2}
-                            value={segment.appearance.contrast}
-                            onChange={(n) =>
-                              updateClip((s) => {
-                                s.appearance.contrast = n;
-                              })
-                            }
-                          />
-                          <Range
-                            label="Saturation"
-                            min={0}
-                            max={2}
-                            value={segment.appearance.saturation}
-                            onChange={(n) =>
-                              updateClip((s) => {
-                                s.appearance.saturation = n;
-                              })
-                            }
-                          />
-                          <div className="panel-divider" />
-                          <h3>Crop & transform</h3>
-                          <div className="button-row">
-                            <button
-                              onClick={() =>
-                                updateClip((s) => {
-                                  s.appearance.rotation =
-                                    (s.appearance.rotation + 1) % 4;
-                                })
-                              }
-                            >
-                              Rotate 90°
-                            </button>
-                            <button
-                              onClick={() =>
-                                updateClip((s) => {
-                                  s.appearance.flipX = !s.appearance.flipX;
-                                })
-                              }
-                            >
-                              Flip ↔
-                            </button>
-                            <button
-                              onClick={() =>
-                                updateClip((s) => {
-                                  s.appearance.flipY = !s.appearance.flipY;
-                                })
-                              }
-                            >
-                              Flip ↕
-                            </button>
-                          </div>
-                          {[
-                            ["X", "x", 0, 0.9],
-                            ["Y", "y", 0, 0.9],
-                            ["Width", "width", 0.1, 1],
-                            ["Height", "height", 0.1, 1],
-                          ].map(([label, key, min, max]) => (
-                            <Range
-                              key={String(key)}
-                              label={String(label)}
-                              value={(segment.appearance.crop as any)[key]}
-                              min={Number(min)}
-                              max={Number(max)}
-                              onChange={(n) =>
-                                updateClip((s) => {
-                                  const c = s.appearance.crop;
-                                  (c as any)[key] = n;
-                                  c.width = Math.min(c.width, 1 - c.x);
-                                  c.height = Math.min(c.height, 1 - c.y);
-                                })
-                              }
-                            />
-                          ))}
-                          <Button
-                            secondary
-                            onClick={() =>
-                              updateClip((s) => {
-                                s.appearance = appearance();
-                              })
-                            }
-                          >
-                            Reset appearance
-                          </Button>
                         </>
                       )
                     )}
@@ -2413,6 +2472,29 @@ export default function App() {
                       <UserRound size={20} />
                       Profile & appearance
                     </h2>
+                    <div className="avatar-editor">
+                      <span className="avatar">
+                        {avatar ? (
+                          <img src={avatar} alt="Your avatar" />
+                        ) : (
+                          <UserRound size={22} />
+                        )}
+                      </span>
+                      <Button
+                        secondary
+                        onClick={() => avatarInput.current?.click()}
+                      >
+                        Change avatar
+                      </Button>
+                      {avatar && (
+                        <button
+                          className="text-button"
+                          onClick={() => setAvatar(null)}
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
                     <label>
                       Display name
                       <input
@@ -2546,13 +2628,14 @@ export default function App() {
                         checked={consent}
                         onChange={(e) => setConsent(e.target.checked)}
                       />
-                      Allow AI processing of audio and transcripts
+                      Allow AI processing of audio, transcripts and attached
+                      reference frames
                     </label>
                     <p>
                       Editing and export happen in your browser. AI features
-                      send extracted audio and/or transcript text through your
-                      selected provider. Publik currently identifies these
-                      providers:{" "}
+                      send extracted audio, transcript text and attached
+                      reference frames through your selected provider. Publik
+                      currently identifies these providers:{" "}
                       {session.profile.aiProviders.join(", ") ||
                         "available after connection"}
                       . No AI upload happens until you allow it.
@@ -2626,6 +2709,7 @@ export default function App() {
                           void run("Deleting your EditAI data", async () => {
                             await api("account", undefined, "DELETE");
                             await clearStorage();
+                            localStorage.removeItem("editai-preferences");
                             location.reload();
                           });
                       }}
@@ -2642,27 +2726,37 @@ export default function App() {
             )}
             {screen === "record" && (
               <Recorder
-                onDone={(files) => void importFiles(files)}
+                onDone={(files) => {
+                  recordingDirty.current = false;
+                  void importFiles(files);
+                }}
+                onDirty={(dirty) => {
+                  recordingDirty.current = dirty;
+                }}
                 onError={fail}
               />
             )}
             {screen === "batch" && (
               <Batch
-                onDone={async (groups) => {
+                onDone={async (groups, useAI) => {
                   await run("Creating batch projects", async () => {
+                    const saved: Project[] = [];
                     for (let n = 0; n < groups.length; n++) {
+                      activeSignal?.throwIfAborted();
+                      if (groups[n].length > 50)
+                        throw Error("Choose at most 50 clips per project.");
                       const d = newDocument();
                       for (const f of groups[n]) {
-                        const s = await probe(f);
-                        if (s.kind !== "video")
-                          throw Error("Batch projects need video files.");
-                        await saveMedia(s.id, f);
-                        d.sources.push(s);
+                        const source = await probe(f);
+                        if (source.kind !== "video")
+                          throw Error("Choose video clips.");
+                        await saveMedia(source.id, f);
+                        d.sources.push(source);
                         d.segments.push(
-                          newSegment(d.sources.length - 1, s.duration),
+                          newSegment(d.sources.length - 1, source.duration),
                         );
                       }
-                      const p = {
+                      const p: Project = {
                         id: crypto.randomUUID(),
                         title:
                           `Batch ${n + 1} — ${groups[n][0].name.replace(/\.[^.]+$/, "")}`.slice(
@@ -2678,13 +2772,49 @@ export default function App() {
                         title: p.title,
                         document: d,
                       });
-                      setProgress((n + 1) / groups.length);
+                      saved.push(p);
+                      setProgress(((n + 1) / groups.length) * 0.2);
                     }
+                    let completed = 0;
+                    const failures: string[] = [];
+                    if (useAI)
+                      for (let i = 0; i < saved.length; i++) {
+                        activeSignal?.throwIfAborted();
+                        const p = saved[i];
+                        try {
+                          setBusy(
+                            `Editing batch video ${i + 1} of ${saved.length}`,
+                          );
+                          const d = await ensureWords(p.document, p);
+                          activeSignal?.throwIfAborted();
+                          const plan = await api("ai/edit", { words: d.words });
+                          activeSignal?.throwIfAborted();
+                          p.document = applyCuts(d, [
+                            ...planCuts(d, plan),
+                            ...(d.quietCuts || []),
+                          ]);
+                          p.updatedAt = Date.now();
+                          await saveProject(p);
+                          await api("projects", {
+                            id: p.id,
+                            title: p.title,
+                            document: p.document,
+                          });
+                          completed++;
+                        } catch (e: any) {
+                          if (e.name === "AbortError") throw e;
+                          failures.push(p.title + ": " + e.message);
+                        }
+                        setProgress((i + 1) / saved.length);
+                      }
                     setProjects(await listProjects());
                     setScreen("library");
                     setNotice(
-                      "Batch projects saved. Open each to run AI or edit.",
+                      useAI
+                        ? `${saved.length} projects saved; ${completed} AI edits completed${failures.length ? `. ${failures.length} kept as original drafts.` : "."}`
+                        : "Batch projects saved.",
                     );
+                    if (failures.length) setError(failures[0]);
                   });
                 }}
               />
@@ -2717,6 +2847,7 @@ export default function App() {
                 value={resolution}
                 onChange={(e) => setResolution(+e.target.value)}
               >
+                <option value={0}>Original dimensions</option>
                 <option value={854}>480p · smaller file</option>
                 <option value={1280}>720p · recommended</option>
                 <option value={1920}>1080p · full HD</option>
@@ -2834,302 +2965,5 @@ export default function App() {
         </div>
       )}
     </>
-  );
-}
-function ProjectCard({
-  p,
-  open,
-  remove,
-}: {
-  p: Project;
-  open: () => void;
-  remove: () => void;
-}) {
-  return (
-    <article className="project-card">
-      <button className="project-preview" onClick={open}>
-        <Film size={38} />
-        <span>{time(duration(p.document))}</span>
-      </button>
-      <div>
-        <button className="project-card-title" onClick={open}>
-          {p.title}
-        </button>
-        <small>
-          {p.document.segments.length} clips ·{" "}
-          {new Date(p.updatedAt).toLocaleDateString()}
-        </small>
-        <IconButton label={"Delete " + p.title} onClick={remove}>
-          <Trash2 size={15} />
-        </IconButton>
-      </div>
-    </article>
-  );
-}
-function Recorder({
-  onDone,
-  onError,
-}: {
-  onDone: (files: File[]) => void;
-  onError: (e: any) => void;
-}) {
-  const [stream, setStream] = useState<MediaStream | null>(null),
-    [recording, setRecording] = useState(false),
-    [takes, setTakes] = useState<File[]>([]),
-    [elapsed, setElapsed] = useState(0),
-    [cap, setCap] = useState(60),
-    [facing, setFacing] = useState("user"),
-    [script, setScript] = useState(""),
-    [scrolling, setScrolling] = useState(false),
-    [speed, setSpeed] = useState(30);
-  const video = useRef<HTMLVideoElement>(null),
-    recorder = useRef<MediaRecorder | null>(null),
-    chunks = useRef<Blob[]>([]),
-    prompter = useRef<HTMLDivElement>(null),
-    start = useRef(0),
-    total = useRef(0);
-  useEffect(
-    () => () => {
-      stream?.getTracks().forEach((t) => t.stop());
-    },
-    [stream],
-  );
-  useEffect(() => {
-    if (video.current) video.current.srcObject = stream;
-  }, [stream]);
-  useEffect(() => {
-    if (!recording) return;
-    const id = setInterval(() => {
-      const n = total.current + (performance.now() - start.current) / 1000;
-      setElapsed(n);
-      if (n >= cap && recorder.current?.state === "recording")
-        recorder.current.stop();
-    }, 100);
-    return () => clearInterval(id);
-  }, [recording, cap]);
-  useEffect(() => {
-    if (!scrolling) return;
-    const id = setInterval(() => {
-      if (prompter.current) prompter.current.scrollTop += speed / 20;
-    }, 50);
-    return () => clearInterval(id);
-  }, [scrolling, speed]);
-  async function camera(next = facing) {
-    try {
-      stream?.getTracks().forEach((t) => t.stop());
-      const s = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: next,
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
-        audio: true,
-      });
-      setStream(s);
-      setFacing(next);
-    } catch (e) {
-      onError(e);
-    }
-  }
-  function record() {
-    if (!stream) return;
-    if (recording) {
-      recorder.current?.stop();
-      return;
-    }
-    if (elapsed >= cap) return;
-    const mime = ["video/webm;codecs=vp8,opus", "video/mp4"].find((m) =>
-      MediaRecorder.isTypeSupported(m),
-    );
-    const r = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
-    chunks.current = [];
-    r.ondataavailable = (e) => chunks.current.push(e.data);
-    r.onstop = () => {
-      total.current += (performance.now() - start.current) / 1000;
-      setElapsed(total.current);
-      setRecording(false);
-      setScrolling(false);
-      const ext = r.mimeType.startsWith("video/mp4") ? "mp4" : "webm";
-      setTakes((t) => [
-        ...t,
-        new File(chunks.current, `Take ${t.length + 1}.${ext}`, {
-          type: r.mimeType,
-        }),
-      ]);
-    };
-    start.current = performance.now();
-    r.start();
-    recorder.current = r;
-    setRecording(true);
-    setScrolling(true);
-  }
-  return (
-    <main className="dashboard recorder-page">
-      <div className="page-heading">
-        <div>
-          <p className="eyebrow">CAMERA READY</p>
-          <h1>Your next great take.</h1>
-          <p>Record a few takes. Bring your words. Make it yours.</p>
-        </div>
-      </div>
-      <div className="recorder-grid">
-        <section className="camera-card">
-          <video ref={video} autoPlay muted playsInline />
-          {script && (
-            <div ref={prompter} className="teleprompter">
-              {script}
-            </div>
-          )}
-          {!stream && (
-            <div className="camera-empty">
-              <Video size={44} />
-              <Button onClick={() => void camera()}>
-                Enable camera & microphone
-              </Button>
-            </div>
-          )}
-          <div className="record-controls">
-            <span>
-              {time(elapsed)} / {time(cap)}
-            </span>
-            <button
-              className={"record-button " + (recording ? "recording" : "")}
-              disabled={!stream || (elapsed >= cap && !recording)}
-              onClick={record}
-              aria-label={recording ? "Stop recording" : "Start recording"}
-            >
-              {recording ? <Square fill="white" size={20} /> : <span />}
-            </button>
-            <button
-              disabled={recording}
-              onClick={() =>
-                void camera(facing === "user" ? "environment" : "user")
-              }
-            >
-              Flip camera
-            </button>
-          </div>
-        </section>
-        <section className="settings-card">
-          <h2>Teleprompter</h2>
-          <textarea
-            maxLength={100000}
-            rows={9}
-            value={script}
-            onChange={(e) => setScript(e.target.value.replace(/\r\n?/g, "\n"))}
-            placeholder="Paste your script. It stays out of the recording."
-          />
-          <Range
-            label="Scroll speed"
-            value={speed}
-            min={5}
-            max={100}
-            step={1}
-            onChange={setSpeed}
-          />
-          <div className="button-row">
-            <button onClick={() => setScrolling(!scrolling)}>
-              {scrolling ? "Pause" : "Scroll"}
-            </button>
-            <button
-              onClick={() => {
-                if (prompter.current) prompter.current.scrollTop = 0;
-              }}
-            >
-              Restart
-            </button>
-          </div>
-          <label>
-            Total recording limit
-            <select
-              disabled={recording || !!takes.length}
-              value={cap}
-              onChange={(e) => setCap(+e.target.value)}
-            >
-              {[30, 60, 180, 600].map((n) => (
-                <option key={n} value={n}>
-                  {time(n)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <h3>{takes.length} recorded takes</h3>
-          {takes.map((f, i) => (
-            <p key={i}>
-              <Check size={13} />
-              {f.name}
-            </p>
-          ))}
-          <Button
-            disabled={!takes.length || recording}
-            onClick={() => {
-              stream?.getTracks().forEach((t) => t.stop());
-              onDone(takes);
-            }}
-          >
-            Use these takes <ArrowRight size={16} />
-          </Button>
-        </section>
-      </div>
-    </main>
-  );
-}
-function Batch({ onDone }: { onDone: (groups: File[][]) => void }) {
-  const [groups, setGroups] = useState<File[][]>(
-    Array.from({ length: 7 }, () => []),
-  );
-  return (
-    <main className="dashboard">
-      <div className="page-heading">
-        <div>
-          <p className="eyebrow">ONE FLOW. MORE POSSIBILITIES.</p>
-          <h1>Create in batches.</h1>
-          <p>
-            Each box becomes its own editable project. Select clips for at least
-            two.
-          </p>
-        </div>
-      </div>
-      <div className="batch-grid">
-        {groups.map((g, i) => (
-          <label className="batch-box" key={i}>
-            <span>VIDEO {String(i + 1).padStart(2, "0")}</span>
-            <Plus size={25} />
-            <strong>
-              {g.length ? g.map((f) => f.name).join(", ") : "Choose clips"}
-            </strong>
-            <input
-              type="file"
-              accept="video/*"
-              multiple
-              hidden
-              onChange={(e) =>
-                setGroups((gs) =>
-                  gs.map((x, j) =>
-                    j === i ? Array.from(e.target.files || []) : x,
-                  ),
-                )
-              }
-            />
-          </label>
-        ))}
-        {groups.length < 10 && (
-          <button
-            className="batch-box"
-            onClick={() => setGroups((g) => [...g, []])}
-          >
-            <Plus />
-            Add another video
-          </button>
-        )}
-      </div>
-      <Button
-        disabled={groups.filter((g) => g.length).length < 2}
-        onClick={() => void onDone(groups.filter((g) => g.length))}
-      >
-        Create {groups.filter((g) => g.length).length} projects{" "}
-        <ArrowRight size={17} />
-      </Button>
-    </main>
   );
 }

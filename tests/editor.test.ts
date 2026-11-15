@@ -110,3 +110,71 @@ test("speed edits project source-attached captions instead of leaving stale time
   assert.ok(a.start > 2.4 && a.start < 2.6);
   assert.ok(a.end <= 3.1);
 });
+
+test("AI removal retains caption anchors on both remaining portions of a target clip", () => {
+  const d = captions(fixture());
+  const out = applyOperations(d, [
+    { kind: "removeRange", target: d.segments[0].id, start: 2, end: 4 },
+  ]);
+  assert.equal(out.segments.length, 2);
+  assert.equal(out.texts.length, 2);
+  assert.ok(out.texts.every((t) => textTiming(out, t).start >= 0));
+});
+test("AI cannot fabricate a target or invalid GPU values", () => {
+  const d = fixture();
+  assert.throws(() =>
+    applyOperations(d, [
+      { kind: "trim", target: crypto.randomUUID(), start: 0, end: 1 },
+    ]),
+  );
+  const out = applyOperations(d, [
+    {
+      kind: "adjustment",
+      target: d.segments[0].id,
+      text: "Exposure",
+      value: 0.5,
+    },
+  ]);
+  assert.equal(out.segments[0].appearance.adjustments?.Exposure, 0.5);
+  assert.throws(() =>
+    applyOperations(d, [
+      { kind: "adjustment", target: null, text: "Exposure", value: NaN },
+    ]),
+  );
+});
+test("caption style preserves supported native options including font, shadow and outline", () => {
+  const d = captions(fixture());
+  const out = applyOperations(d, [
+    {
+      kind: "captionStyle",
+      target: null,
+      scope: "captions",
+      style: {
+        font: "anton",
+        outlineWidth: 0.01,
+        textOpacity: 0.7,
+        shadowOpacity: 0.5,
+        letterSpacing: 0.1,
+      },
+    },
+  ]);
+  assert.equal(out.texts[0].font, "Anton");
+  assert.equal(out.texts[0].opacity, 0.7);
+  assert.equal(out.texts[0].outlineWidth, 0.01);
+});
+
+test("quiet-pause evidence never cuts the protected union of overlapping words", async () => {
+  const { silenceCuts } = await import("../lib/editor/model.ts");
+  const rate = 1000,
+    samples = new Float32Array(7000);
+  const words = [
+    { id: "a", clip: 0, start: 0, end: 4, text: "overlap" },
+    { id: "b", clip: 0, start: 1, end: 2, text: "inside" },
+    { id: "c", clip: 0, start: 5, end: 6, text: "later" },
+  ];
+  const cuts = silenceCuts(samples, rate, words, 0);
+  assert.equal(cuts.length, 1);
+  assert.ok(cuts[0].start >= 4);
+  assert.ok(cuts[0].end <= 5);
+  assert.equal(silenceCuts(samples, rate, [], 0).length, 0);
+});

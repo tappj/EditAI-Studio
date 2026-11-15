@@ -1,6 +1,7 @@
 import type { FFmpeg } from "@ffmpeg/ffmpeg";
 import type { Document, Source, TextLayer } from "./model";
-import { atTime, duration, cssFilter, textTiming } from "./model";
+import { atTime, duration, cssFilter, textTiming, appearance } from "./model";
+import { ColorRenderer } from "./color";
 let instance: FFmpeg | undefined;
 let loading: Promise<FFmpeg> | undefined;
 export async function ffmpeg() {
@@ -79,7 +80,11 @@ export async function extractAudio(blob: Blob, start: number, length: number) {
     await f.deleteFile(out).catch(() => {});
   }
 }
-export async function toMP4(blob: Blob, progress: (n: number) => void) {
+export async function toMP4(
+  blob: Blob,
+  progress: (n: number) => void,
+  fps = 30,
+) {
   const f = await ffmpeg();
   const id = crypto.randomUUID();
   const input = id + ".webm",
@@ -101,6 +106,8 @@ export async function toMP4(blob: Blob, progress: (n: number) => void) {
         "20",
         "-pix_fmt",
         "yuv420p",
+        "-r",
+        String(fps),
         "-c:a",
         "aac",
         "-b:a",
@@ -191,6 +198,7 @@ export function canvasSize(doc: Document, longest = 1280) {
           : doc.canvas === "1:1"
             ? 1
             : (src?.width || 16) / (src?.height || 9);
+  longest = longest || Math.max(src?.width || 1280, src?.height || 720);
   return {
     width: Math.round((ratio >= 1 ? longest : longest * ratio) / 2) * 2,
     height: Math.round((ratio >= 1 ? longest / ratio : longest) / 2) * 2,
@@ -206,32 +214,42 @@ function drawText(
   end: number,
 ) {
   ctx.save();
-  const phase = Math.min(
-    1,
-    Math.max(0, Math.min(time - start, end - time) / 0.25),
+  const transition = Math.min(
+    t.animationDuration ?? 0.35,
+    (end - start) * 0.45,
   );
-  ctx.globalAlpha = t.animation === "fade" ? phase : 1;
+  const inPhase = Math.min(1, Math.max(0, (time - start) / transition)),
+    outPhase = Math.min(1, Math.max(0, (end - time) / transition));
+  const animation =
+      time - start < end - time ? t.animation : t.animationOut || t.animation,
+    phase = Math.min(inPhase, outPhase);
+  ctx.globalAlpha = (t.opacity ?? 1) * (animation === "fade" ? phase : 1);
   ctx.translate(t.x * w, t.y * h);
-  if (t.animation === "pop" || t.animation === "zoom") {
+  if (animation === "pop" || animation === "zoom") {
     const scale = 0.8 + 0.2 * (1 - (1 - phase) ** 3);
     ctx.scale(scale, scale);
   }
-  if (t.animation === "slide") ctx.translate(0, (1 - phase) * h * 0.03);
+  if (animation === "slide") ctx.translate(0, (1 - phase) * h * 0.03);
   const size = t.size * w;
   ctx.font = `600 ${size}px "${t.font}"`;
-  ctx.textAlign = "center";
+  ctx.textAlign = t.alignment || "center";
   ctx.textBaseline = "middle";
+  if ("letterSpacing" in ctx)
+    ctx.letterSpacing = (t.letterSpacing ?? 0) * size + "px";
   let text = t.text;
-  if (t.animation === "typewriter")
+  if (animation === "typewriter")
     text = text.slice(
       0,
-      Math.ceil(text.length * Math.min(1, (time - start) / 0.5)),
+      Math.ceil(
+        text.length * Math.min(1, (time - start) / Math.max(0.1, transition)),
+      ),
     );
-  const lines: string[] = [];
+  const boxWidth = (t.boxWidth ?? 0.86) * w,
+    lines: string[] = [];
   for (const p of text.split("\n")) {
     let line = "";
     for (const word of p.split(" ")) {
-      if (line && ctx.measureText(line + " " + word).width > w * 0.86) {
+      if (line && ctx.measureText(line + " " + word).width > boxWidth) {
         lines.push(line);
         line = word;
       } else line += (line ? " " : "") + word;
@@ -239,28 +257,60 @@ function drawText(
     lines.push(line);
   }
   lines.forEach((line, i) => {
-    const y = (i - (lines.length - 1) / 2) * size * 1.2;
+    const y =
+      (i - (lines.length - 1) / 2) * size * (1.2 + (t.lineSpacing ?? 0));
+    const mw = ctx.measureText(line).width,
+      x =
+        t.alignment === "left"
+          ? -boxWidth / 2
+          : t.alignment === "right"
+            ? boxWidth / 2
+            : 0,
+      left =
+        t.alignment === "left"
+          ? x
+          : t.alignment === "right"
+            ? x - mw
+            : x - mw / 2,
+      padding = (t.backgroundPadding ?? 0.012) * w;
     if (t.background !== "transparent") {
+      ctx.save();
+      ctx.globalAlpha *= t.backgroundOpacity ?? 1;
       ctx.fillStyle = t.background;
-      const mw = ctx.measureText(line).width;
-      ctx.fillRect(
-        -mw / 2 - size * 0.25,
-        y - size * 0.6,
-        mw + size * 0.5,
-        size * 1.2,
+      ctx.beginPath();
+      ctx.roundRect(
+        left - padding,
+        y - size * 0.6 - padding / 2,
+        mw + padding * 2,
+        size * 1.2 + padding,
+        (t.backgroundRadius ?? 0) * w,
       );
+      ctx.fill();
+      ctx.restore();
+    }
+    if (t.shadowOpacity) {
+      const c = t.shadowColor || "#000000";
+      ctx.shadowColor =
+        c +
+        Math.round(t.shadowOpacity * 255)
+          .toString(16)
+          .padStart(2, "0");
+      ctx.shadowBlur = (t.shadowBlur ?? 0.005) * w;
+      ctx.shadowOffsetX = (t.shadowOffset ?? 0.003) * w;
+      ctx.shadowOffsetY = (t.shadowOffset ?? 0.003) * w;
     }
     if (t.outline) {
-      ctx.strokeStyle = "#000000";
-      ctx.lineWidth = Math.max(2, w * 0.00495);
+      ctx.strokeStyle = t.outlineColor || "#000000";
+      ctx.lineWidth = Math.max(0.5, w * (t.outlineWidth ?? 0.00495));
       ctx.lineJoin = "round";
-      ctx.strokeText(line, 0, y);
+      ctx.strokeText(line, x, y, boxWidth);
     }
     ctx.fillStyle = t.color;
-    ctx.fillText(line, 0, y);
+    ctx.fillText(line, x, y, boxWidth);
   });
   ctx.restore();
 }
+
 export class Player {
   canvas: HTMLCanvasElement;
   doc: Document;
@@ -277,7 +327,9 @@ export class Player {
   onTime: (t: number) => void;
   onEnd?: () => void;
   onError?: (s: string) => void;
+  onFailure?: (e: Error) => void;
   exporting = false;
+  color: ColorRenderer | null = null;
   constructor(
     canvas: HTMLCanvasElement,
     doc: Document,
@@ -310,6 +362,10 @@ export class Player {
         v.preload = "auto";
         if (v instanceof HTMLVideoElement) v.playsInline = true;
         v.src = url;
+        v.setAttribute("aria-hidden", "true");
+        v.style.cssText =
+          "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0.001;pointer-events:none;z-index:-1";
+        document.body.appendChild(v);
         v.onerror = () =>
           this.onError?.("This browser could not decode the selected video.");
         this.videos.set(i, v);
@@ -339,6 +395,7 @@ export class Player {
         gain.connect(this.ctx.destination);
         gain.connect(this.dest!);
         this.nodes.set(i, gain);
+        v.volume = 1;
       }
     }
     void this.ctx.resume();
@@ -431,7 +488,7 @@ export class Player {
               ? Math.max(spaceW / vw, spaceH / vh)
               : Math.min(spaceW / vw, spaceH / vh);
         ctx.drawImage(
-          v,
+          (this.color ??= new ColorRenderer()).render(v, a),
           src.width * c.x,
           src.height * c.y,
           vw,
@@ -454,16 +511,31 @@ export class Player {
         (media instanceof HTMLImageElement ||
           (media instanceof HTMLVideoElement && media.readyState >= 2))
       ) {
-        const ow = o.width * w,
-          oh = (ow * s.height) / s.width;
+        const a = o.appearance || appearance(),
+          c = a.crop,
+          cw = s.width * c.width,
+          ch = s.height * c.height,
+          scale = (o.width * w) / (a.rotation % 2 ? ch : cw);
         ctx.save();
-        ctx.globalAlpha = o.opacity;
+        ctx.globalAlpha = o.opacity * a.opacity;
+        ctx.filter = cssFilter(a);
+        ctx.translate(o.x * w, o.y * h);
+        ctx.rotate((a.rotation * Math.PI) / 2);
+        ctx.scale(a.flipX ? -1 : 1, a.flipY ? -1 : 1);
+        const renderable = (this.color ??= new ColorRenderer()).render(
+          media as HTMLVideoElement | HTMLImageElement,
+          a,
+        );
         ctx.drawImage(
-          media as CanvasImageSource,
-          o.x * w - ow / 2,
-          o.y * h - oh / 2,
-          ow,
-          oh,
+          renderable,
+          s.width * c.x,
+          s.height * c.y,
+          cw,
+          ch,
+          (-cw * scale) / 2,
+          (-ch * scale) / 2,
+          cw * scale,
+          ch * scale,
         );
         ctx.restore();
       }
@@ -492,8 +564,16 @@ export class Player {
         this.time + (now - this.last) / 1000,
       );
       this.last = now;
-      this.sync();
-      this.draw();
+      try {
+        this.sync();
+        this.draw();
+      } catch (e) {
+        this.pause();
+        const err = e instanceof Error ? e : Error(String(e));
+        this.onError?.(err.message);
+        this.onFailure?.(err);
+        return;
+      }
       this.onTime(this.time);
       if (this.time >= duration(this.doc)) {
         this.pause();
@@ -515,8 +595,10 @@ export class Player {
     for (const v of this.videos.values()) {
       v.removeAttribute("src");
       v.load();
+      v.remove();
     }
     void this.ctx?.close();
+    this.color?.destroy();
     this.videos.clear();
   }
   async export(
@@ -555,6 +637,10 @@ export class Player {
           if (recorder.state !== "inactive") recorder.stop();
         };
         signal.addEventListener("abort", stop, { once: true });
+        this.onFailure = (e) => {
+          stop();
+          reject(e);
+        };
         recorder.ondataavailable = (e) => {
           if (e.data.size) chunks.push(e.data);
         };
@@ -586,11 +672,12 @@ export class Player {
       const blob = new Blob(chunks, { type: mime });
       if (mime.startsWith("video/mp4")) return blob;
       progress(0.76);
-      return await toMP4(blob, (n) => progress(0.76 + n * 0.24));
+      return await toMP4(blob, (n) => progress(0.76 + n * 0.24), fps);
     } finally {
       this.pause();
       this.onTime = previous;
       this.onEnd = undefined;
+      this.onFailure = undefined;
       this.exporting = false;
       this.seek(oldTime);
       for (const t of stream.getVideoTracks()) t.stop();

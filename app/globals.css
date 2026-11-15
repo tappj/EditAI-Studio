@@ -2299,3 +2299,71 @@ progress {
 .waveform i {
   height: 3px !important;
 }
+.reference-picker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+}
+.reference-picker .text-button {
+  font-size: 9px;
+  max-width: 90%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.reference-picker .icon-button {
+  width: 22px;
+  height: 22px;
+}
+.advanced-adjustments summary {
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 5px 0;
+  color: var(--muted);
+}
+.batch-ai {
+  margin: 0 0 20px;
+}
+.avatar {
+  overflow: hidden;
+}
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.avatar-editor {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.avatar-editor .avatar {
+  width: 48px;
+  height: 48px;
+}
+.avatar-editor .button {
+  font-size: 11px;
+  min-height: 35px;
+  padding: 8px 12px;
+}
+.text-style-editor {
+  margin: 16px 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.text-style-editor summary {
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-bottom: 14px;
+}
+.text-style-editor > label {
+  margin: 12px 0;
+}
+.text-style-editor input[type="color"] {
+  width: 100%;
+  height: 30px;
+  padding: 3px !important;
+}

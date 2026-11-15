@@ -8,6 +8,20 @@
       "when": 1794728210036,
       "tag": "0000_furry_phil_sheldon",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1794730627378,
+      "tag": "0001_massive_expediter",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794732068166,
+      "tag": "0002_optimal_the_anarchist",
+      "breakpoints": true
     }
   ]
 }

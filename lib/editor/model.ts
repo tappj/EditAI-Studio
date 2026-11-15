@@ -1,3 +1,4 @@
+import { FONTS } from "./fonts.ts";
 export type Word = {
   id: string;
   clip: number;
@@ -27,6 +28,7 @@ export type Appearance = {
   flipY: boolean;
   crop: { x: number; y: number; width: number; height: number };
   opacity: number;
+  adjustments?: Record<string, number>;
 };
 export type Segment = {
   id: string;
@@ -50,9 +52,26 @@ export type TextLayer = {
   font: string;
   outline: boolean;
   animation: string;
+  animationOut?: string;
+  animationDuration?: number;
+  opacity?: number;
+  outlineWidth?: number;
+  outlineColor?: string;
+  boxWidth?: number;
+  alignment?: "left" | "center" | "right";
+  letterSpacing?: number;
+  lineSpacing?: number;
+  shadowOpacity?: number;
+  shadowColor?: string;
+  shadowBlur?: number;
+  shadowOffset?: number;
+  backgroundOpacity?: number;
+  backgroundPadding?: number;
+  backgroundRadius?: number;
   anchor?: { segmentId: string; start: number; end: number };
 };
 export type Overlay = {
+  appearance?: Appearance;
   id: string;
   sourceIndex: number;
   start: number;
@@ -81,6 +100,7 @@ export type Document = {
   overlays: Overlay[];
   audio: AudioLayer[];
   words: Word[];
+  quietCuts?: { clip: number; start: number; end: number }[];
   canvas: "original" | "9:16" | "16:9" | "1:1";
   framing: "fit" | "fill";
   captionFormat: "standard" | "boxed" | "single";
@@ -103,6 +123,7 @@ export const appearance = (): Appearance => ({
   flipY: false,
   crop: { x: 0, y: 0, width: 1, height: 1 },
   opacity: 1,
+  adjustments: {},
 });
 export const newDocument = (): Document => ({
   segments: [],
@@ -165,6 +186,7 @@ export function validate(d: Document) {
     if (
       ids.has(s.id) ||
       !src ||
+      src.kind !== "video" ||
       !finite(s.start, 0, src.duration) ||
       !finite(s.end, 0.1, src.duration + 0.01) ||
       s.end - s.start < 0.099 ||
@@ -187,6 +209,8 @@ export function validate(d: Document) {
       !filters.includes(a.filter)
     )
       throw Error("This edit would create an invalid clip.");
+    if (Object.values(a.adjustments || {}).some((v) => !finite(v, -1, 1)))
+      throw Error("Invalid color adjustment.");
     ids.add(s.id);
   }
   const len = duration(d);
@@ -212,6 +236,9 @@ export function validate(d: Document) {
       !finite(o.start, 0, len) ||
       !finite(o.end, o.start + 0.01, len) ||
       !finite(o.sourceStart, 0, d.sources[o.sourceIndex].duration) ||
+      (d.sources[o.sourceIndex].kind !== "image" &&
+        o.sourceStart + o.end - o.start >
+          d.sources[o.sourceIndex].duration + 0.05) ||
       !finite(o.x, 0, 1) ||
       !finite(o.y, 0, 1) ||
       !finite(o.width, 0.1, 1) ||
@@ -225,6 +252,8 @@ export function validate(d: Document) {
       !finite(a.start, 0, len) ||
       !finite(a.end, a.start + 0.01, len) ||
       !finite(a.sourceStart, 0, d.sources[a.sourceIndex].duration) ||
+      a.sourceStart + a.end - a.start >
+        d.sources[a.sourceIndex].duration + 0.05 ||
       !finite(a.volume, 0, 1) ||
       !Number.isInteger(a.lane) ||
       a.lane < 0 ||
@@ -465,9 +494,16 @@ export function silenceCuts(
     levels.push(20 * Math.log10(Math.max(1e-8, Math.sqrt(sum / step))));
   }
   const candidates: { clip: number; start: number; end: number }[] = [];
-  const sorted = words
+  const anchors = words
     .filter((w) => w.clip === clip)
     .sort((a, b) => a.start - b.start);
+  const sorted: { start: number; end: number }[] = [];
+  for (const word of anchors) {
+    const previous = sorted.at(-1);
+    if (previous && word.start <= previous.end)
+      previous.end = Math.max(previous.end, word.end);
+    else sorted.push({ start: word.start, end: word.end });
+  }
   for (let i = 1; i < sorted.length; i++) {
     const a = sorted[i - 1].end + 0.02,
       b = sorted[i].start - 0.02;
@@ -527,6 +563,14 @@ export function applyOperations(d: Document, ops: any[]) {
             op.scope === "all" ||
             (op.scope === "captions" ? !!t.anchor : !t.anchor),
         );
+    if (
+      op.target &&
+      !out.segments.some((s) => s.id === op.target) &&
+      !out.texts.some((t) => t.id === op.target)
+    )
+      throw Error(
+        "AI referred to a layer that does not exist. Your project was kept.",
+      );
     switch (op.kind) {
       case "trim":
         for (const s of targets) {
@@ -536,21 +580,39 @@ export function applyOperations(d: Document, ops: any[]) {
         break;
       case "removeRange": {
         const s = targets[0];
-        if (!s) throw Error("Select a clip.");
+        if (
+          !s ||
+          !Number.isFinite(op.start) ||
+          !Number.isFinite(op.end) ||
+          op.start < s.start ||
+          op.end > s.end ||
+          op.end <= op.start
+        )
+          throw Error("Unsafe removal range.");
         const parts = [
           { start: s.start, end: op.start },
           { start: op.end, end: s.end },
-        ].filter((x) => x.end - x.start >= 0.1);
-        const i = out.segments.indexOf(s);
-        out.segments.splice(
-          i,
-          1,
-          ...parts.map((p, j) => ({
+        ]
+          .filter((p) => p.end - p.start >= 0.1)
+          .map((p, j) => ({
             ...structuredClone(s),
             ...p,
             id: j ? crypto.randomUUID() : s.id,
-          })),
-        );
+          }));
+        const anchored = out.texts.filter((t) => t.anchor?.segmentId === s.id);
+        out.texts = out.texts.filter((t) => t.anchor?.segmentId !== s.id);
+        for (const part of parts)
+          for (const t of anchored) {
+            const start = Math.max(t.anchor!.start, part.start),
+              end = Math.min(t.anchor!.end, part.end);
+            if (end > start)
+              out.texts.push({
+                ...t,
+                id: crypto.randomUUID(),
+                anchor: { segmentId: part.id, start, end },
+              });
+          }
+        out.segments.splice(out.segments.indexOf(s), 1, ...parts);
         break;
       }
       case "delete":
@@ -604,13 +666,33 @@ export function applyOperations(d: Document, ops: any[]) {
           Brightness: "brightness",
           Contrast: "contrast",
           Saturation: "saturation",
-          Warmth: "warmth",
         };
-        if (!map[op.text])
-          throw Error("That adjustment is not available in the browser yet.");
-        for (const s of targets)
-          (s.appearance as any)[map[op.text]] =
-            op.value + (["Contrast", "Saturation"].includes(op.text) ? 1 : 0);
+        const allowed = [
+          "Exposure",
+          "Brilliance",
+          "Highlights",
+          "Shadows",
+          "Black point",
+          "Vibrance",
+          "Warmth",
+          "Tint",
+          "Sharpness",
+          "Definition",
+          "Vintage",
+          "Fade",
+          "Vignette",
+        ];
+        if (!map[op.text] && !allowed.includes(op.text))
+          throw Error("Unknown adjustment.");
+        for (const s of targets) {
+          if (map[op.text])
+            (s.appearance as any)[map[op.text]] =
+              op.value + (["Contrast", "Saturation"].includes(op.text) ? 1 : 0);
+          else {
+            s.appearance.adjustments ??= {};
+            s.appearance.adjustments[op.text] = op.value;
+          }
+        }
         break;
       }
       case "opacity":
@@ -618,9 +700,15 @@ export function applyOperations(d: Document, ops: any[]) {
         break;
       case "resetAppearance":
         for (const s of targets) {
-          const opacity = s.appearance.opacity;
-          s.appearance = appearance();
-          s.appearance.opacity = opacity;
+          const old = s.appearance;
+          s.appearance = {
+            ...appearance(),
+            opacity: old.opacity,
+            crop: old.crop,
+            rotation: old.rotation,
+            flipX: old.flipX,
+            flipY: old.flipY,
+          };
         }
         break;
       case "crop":
@@ -692,18 +780,46 @@ export function applyOperations(d: Document, ops: any[]) {
               v.background === "none" ? "transparent" : v.background;
           if (v.animationIn) t.animation = v.animationIn;
           if (v.font) {
-            const fonts: Record<string, string> = {
+            const normalize = (x: string) =>
+              x.toLowerCase().replace(/[^a-z0-9]/g, "");
+            const special: Record<string, string> = {
               tiktokClassic: "TikTok Sans",
-              inter: "Inter",
-              montserrat: "Montserrat",
-              poppins: "Poppins",
+              arial: "Arial",
+              outlinedArial: "Arial",
             };
-            if (!fonts[v.font])
-              throw Error(
-                "This font has not been installed in the web editor.",
-              );
-            t.font = fonts[v.font];
+            const font =
+              special[v.font] ||
+              FONTS.find((f) => normalize(f) === normalize(v.font));
+            if (!font) throw Error("This font is not available.");
+            t.font = font;
           }
+          const fields: Record<string, string> = {
+            outlineWidth: "outlineWidth",
+            textBoxWidth: "boxWidth",
+            alignment: "alignment",
+            letterSpacing: "letterSpacing",
+            lineSpacing: "lineSpacing",
+            textOpacity: "opacity",
+            shadowOpacity: "shadowOpacity",
+            shadowBlur: "shadowBlur",
+            shadowOffset: "shadowOffset",
+            backgroundOpacity: "backgroundOpacity",
+            backgroundPadding: "backgroundPadding",
+            backgroundRadius: "backgroundRadius",
+            animationOut: "animationOut",
+            animationDuration: "animationDuration",
+          };
+          for (const [from, to] of Object.entries(fields))
+            if (v[from] != null) (t as any)[to] = v[from];
+          if (v.outlineColor) t.outlineColor = color(v.outlineColor);
+          else if (
+            v.outline &&
+            v.outline !== "automatic" &&
+            v.outline !== "none"
+          )
+            t.outlineColor = v.outline;
+          if (v.backgroundColor) t.background = color(v.backgroundColor);
+          if (v.shadowColor) t.shadowColor = color(v.shadowColor);
         }
         break;
       default:

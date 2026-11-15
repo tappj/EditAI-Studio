@@ -1,4 +1,4 @@
-import { ApiError } from "./publik";
+import { ApiError } from "./publik.ts";
 export const hash = async (s: string) =>
   Array.from(
     new Uint8Array(

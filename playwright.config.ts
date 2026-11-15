@@ -5,7 +5,7 @@ export default defineConfig({
   use: {
     actionTimeout: 15000,
     baseURL: process.env.TEST_BASE_URL || "http://127.0.0.1:5180",
-    channel: "chrome",
+    channel: process.env.PLAYWRIGHT_CHANNEL || "chromium",
     headless: true,
     acceptDownloads: true,
     launchOptions: {

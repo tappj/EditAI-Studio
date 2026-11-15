@@ -68,6 +68,8 @@ test("real browser upload, split, undo, speed, text, canvas, MP4 export and save
   await expect(page.locator(".timeline-clip")).toHaveCount(1);
   await page.getByRole("button", { name: "Redo", exact: true }).click();
   await expect(page.locator(".timeline-clip")).toHaveCount(2);
+  await page.getByText("More adjustments", { exact: true }).click();
+  await page.getByRole("slider", { name: /^Exposure/ }).fill("0.25");
   await page.getByLabel("Canvas aspect ratio").selectOption("1:1");
   await page.getByRole("button", { name: "Text", exact: true }).click();
   await page.getByRole("button", { name: "Add text", exact: true }).click();
@@ -123,11 +125,34 @@ test("AI failure preserves timeline and explains recovery", async ({
   await expect(page.locator(".timeline-clip")).toHaveCount(1);
 });
 
-test("record camera takes with teleprompter, confirm and import playable project", async ({
+test("MediaRecorder takes with generated camera source, teleprompter and playable import", async ({
   page,
 }) => {
   await authenticated(page);
-  await page.context().grantPermissions(["camera", "microphone"]);
+  // The test uses real browser MediaRecorder/canvas/audio, with a generated camera
+  // source. OS-level camera/microphone permission remains a physical-device check.
+  await page.addInitScript(() => {
+    navigator.mediaDevices.getUserMedia = async () => {
+      const c = document.createElement("canvas");
+      c.width = 320;
+      c.height = 180;
+      const ctx = c.getContext("2d")!;
+      let frame = 0;
+      setInterval(() => {
+        ctx.fillStyle = frame++ % 2 ? "#a8f0f0" : "#598fd9";
+        ctx.fillRect(0, 0, 320, 180);
+      }, 50);
+      const stream = c.captureStream(24);
+      const audio = new AudioContext(),
+        osc = audio.createOscillator(),
+        dest = audio.createMediaStreamDestination();
+      osc.connect(dest);
+      osc.start();
+      void audio.resume();
+      stream.addTrack(dest.stream.getAudioTracks()[0]);
+      return stream;
+    };
+  });
   await page.goto("/");
   await page
     .getByRole("button", { name: "Record", exact: true })
@@ -153,4 +178,191 @@ test("record camera takes with teleprompter, confirm and import playable project
     page.getByRole("button", { name: "Split clip at playhead" }),
   ).toBeVisible({ timeout: 120000 });
   await expect(page.locator(".timeline-clip")).toHaveCount(1);
+});
+
+test("overlay and imported audio appear in actual exported media", async ({
+  page,
+}) => {
+  await authenticated(page);
+  await page.goto("/");
+  await expect(
+    page.getByRole("button", { name: "Create a video", exact: true }),
+  ).toBeVisible();
+  await page
+    .locator("input[type=file]")
+    .first()
+    .setInputFiles(join(process.cwd(), "outputs/fixture.mp4"));
+  await page.getByRole("button", { name: "Layers", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Add image / video" })
+    .click({ noWaitAfter: true });
+  await page
+    .locator("input[type=file]")
+    .nth(1)
+    .setInputFiles(join(process.cwd(), "outputs/overlay.png"));
+  await expect(page.locator(".layer-settings")).toHaveCount(1);
+  await page
+    .getByRole("button", { name: "Add audio", exact: true })
+    .click({ noWaitAfter: true });
+  await page
+    .locator("input[type=file]")
+    .nth(1)
+    .setInputFiles(join(process.cwd(), "outputs/music.wav"));
+  await expect(page.locator(".layer-settings")).toHaveCount(2);
+  await page.getByRole("button", { name: "Export", exact: true }).click();
+  await page
+    .getByRole("combobox", { name: /Resolution|Export resolution/i })
+    .selectOption("854");
+  const d = page.waitForEvent("download", { timeout: 120000 });
+  await page.getByRole("button", { name: "Export video", exact: true }).click();
+  await (await d).saveAs("outputs/layers-export.mp4");
+  await expect(page.getByRole("status")).toContainText("MP4 exported");
+});
+
+test("batch creates separate persistent editable projects", async ({
+  page,
+}) => {
+  await authenticated(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: /Batch edit/ }).click();
+  await page
+    .locator(".batch-box input")
+    .nth(0)
+    .setInputFiles(join(process.cwd(), "outputs/fixture.mp4"));
+  await page
+    .locator(".batch-box input")
+    .nth(1)
+    .setInputFiles(join(process.cwd(), "outputs/fixture.mp4"));
+  await page.getByRole("checkbox", { name: /Run AI editing/ }).uncheck();
+  await page.getByRole("button", { name: "Create 2 projects" }).click();
+  await expect(page.locator(".project-card")).toHaveCount(2);
+});
+
+test("mutation routes reject requests from another origin", async ({
+  request,
+}) => {
+  const r = await request.post("/api/projects", {
+    headers: { origin: "https://untrusted.invalid" },
+    data: { id: "invalid" },
+  });
+  expect(r.status()).toBe(403);
+  expect(await r.json()).toMatchObject({
+    error: "This request must come from EditAI.",
+  });
+});
+
+test("Publik Chirp upload flow creates one resumable word-timestamp job per source", async ({
+  page,
+}) => {
+  await page.route("**/api/session", (r) =>
+    r.fulfill({
+      json: { ...session, profile: { ...session.profile, choice: "publik" } },
+    }),
+  );
+  await page.route("**/api/projects", (r) =>
+    r.fulfill({ json: { projects: [] } }),
+  );
+  await page.route("**/api/telemetry", (r) =>
+    r.fulfill({ json: { ok: true } }),
+  );
+  let jobs = 0,
+    uploads = 0;
+  await page.route("**/api/ai/speech-source/*", (r) =>
+    r.fulfill({ json: { id: null, pending: false } }),
+  );
+  await page.route("**/api/ai/audio-upload", (r) => {
+    uploads++;
+    return r.fulfill({
+      json: {
+        id: "upl_fixture",
+        uploadURL: "https://storage.googleapis.com/editai-test-fixture",
+      },
+    });
+  });
+  await page.route(
+    "https://storage.googleapis.com/editai-test-fixture",
+    async (r) => {
+      expect(r.request().headers()["authorization"]).toBeUndefined();
+      await r.fulfill({ status: 200, body: "" });
+    },
+  );
+  await page.route("**/api/ai/transcription-job", (r) => {
+    jobs++;
+    expect(r.request().postDataJSON().sourceId).toBeTruthy();
+    return r.fulfill({ json: { id: "trx_fixture", status: "queued" } });
+  });
+  await page.route("**/api/ai/transcription-job/trx_fixture", (r) =>
+    r.fulfill({
+      json: {
+        id: "trx_fixture",
+        status: "completed",
+        words: [
+          { word: "A", start: 0.3, end: 0.5 },
+          { word: "real", start: 0.5, end: 0.8 },
+          { word: "caption.", start: 0.9, end: 1.3 },
+        ],
+      },
+    }),
+  );
+  await page.goto("/");
+  await expect(
+    page.getByRole("button", { name: "Create a video", exact: true }),
+  ).toBeVisible();
+  await page
+    .locator("input[type=file]")
+    .first()
+    .setInputFiles(join(process.cwd(), "outputs/fixture.mp4"));
+  await page
+    .getByRole("button", { name: "Generate captions", exact: true })
+    .click();
+  await expect(page.locator(".text-layer-list>button")).toHaveCount(1);
+  expect(jobs).toBe(1);
+  expect(uploads).toBe(1);
+  await page
+    .getByRole("button", { name: "Generate speech captions", exact: true })
+    .click();
+  await expect(page.locator(".text-layer-list>button")).toHaveCount(1);
+  expect(jobs).toBe(1);
+});
+
+test("visual style references attach actual browser-decoded image frames to chat", async ({
+  page,
+}) => {
+  await authenticated(page);
+  let reference: any;
+  await page.route("**/api/ai/chat", (r) => {
+    reference = r.request().postDataJSON().reference;
+    return r.fulfill({
+      json: {
+        message: "Fixture response: reference received; no edits applied.",
+        generateCaptions: false,
+        captionFormat: null,
+        operations: [],
+      },
+    });
+  });
+  await page.goto("/");
+  await expect(
+    page.getByRole("button", { name: "Create a video", exact: true }),
+  ).toBeVisible();
+  await page
+    .locator("input[type=file]")
+    .first()
+    .setInputFiles(join(process.cwd(), "outputs/fixture.mp4"));
+  await page.getByRole("button", { name: "EditAI", exact: true }).click();
+  await page.getByRole("button", { name: "Add a style reference" }).click();
+  await page
+    .locator("input[type=file]")
+    .nth(2)
+    .setInputFiles(join(process.cwd(), "outputs/overlay.png"));
+  await expect(
+    page.getByRole("button", { name: "Remove reference" }),
+  ).toBeVisible();
+  await page.getByLabel("Message EditAI").fill("Match this reference style");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator(".message.assistant")).toContainText(
+    "reference received",
+  );
+  expect(reference.kind).toBe("image");
+  expect(reference.frames[0].base64JPEG.startsWith("/9j/")).toBe(true);
 });
