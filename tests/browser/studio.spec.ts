@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 const session = {
   screen: { id: "ready" },
   profile: {
@@ -133,6 +134,79 @@ test("AI failure preserves timeline and explains recovery", async ({
   await expect(page.locator(".timeline-clip")).toHaveCount(1);
 });
 
+test("large local media survives a browser reload and deletion removes its storage", async ({
+  page,
+}) => {
+  await authenticated(page);
+  await page.route("**/api/projects/*", (r) =>
+    r.fulfill({ json: { ok: true } }),
+  );
+  await page.goto("/");
+  // Valid short MP4 plus trailing padding crosses the fallback chunk boundary
+  // without changing the decoded fixture or requiring a long recording.
+  const video = await readFile("outputs/fixture.mp4");
+  await page
+    .locator("input[type=file]")
+    .first()
+    .setInputFiles({
+      name: "storage-recovery.mp4",
+      mimeType: "video/mp4",
+      buffer: Buffer.concat([video, Buffer.alloc(5 * 1024 * 1024)]),
+    });
+  await expect(
+    page.getByRole("button", { name: "Split clip at playhead" }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "My creations", exact: true })
+    .first()
+    .click();
+  await page.reload();
+  await page
+    .getByRole("button", { name: /^My creations/ })
+    .first()
+    .click();
+  await page.locator(".project-card-title").click();
+  await expect(
+    page.getByRole("button", { name: "Split clip at playhead" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Play", exact: true }).click();
+  await expect
+    .poll(async () =>
+      Number(await page.getByLabel("Timeline playhead").inputValue()),
+    )
+    .toBeGreaterThan(0.2);
+  await page.getByRole("button", { name: "Pause", exact: true }).click();
+  await page
+    .getByRole("button", { name: "My creations", exact: true })
+    .first()
+    .click();
+  page.once("dialog", (d) => d.accept());
+  await page
+    .getByRole("button", { name: "Delete storage-recovery", exact: true })
+    .click();
+  await expect(page.locator(".project-card")).toHaveCount(0);
+  const remaining = await page.evaluate(
+    () =>
+      new Promise<number>((resolve, reject) => {
+        const request = indexedDB.open("editai-studio");
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => {
+          const database = request.result;
+          const keys = database
+            .transaction("media")
+            .objectStore("media")
+            .getAllKeys();
+          keys.onsuccess = () => {
+            resolve(keys.result.length);
+            database.close();
+          };
+          keys.onerror = () => reject(keys.error);
+        };
+      }),
+  );
+  expect(remaining).toBe(0);
+});
+
 test("MediaRecorder takes with generated camera source, teleprompter and playable import", async ({
   page,
 }) => {
@@ -140,7 +214,10 @@ test("MediaRecorder takes with generated camera source, teleprompter and playabl
   // The test uses real browser MediaRecorder/canvas/audio, with a generated camera
   // source. OS-level camera/microphone permission remains a physical-device check.
   await page.addInitScript(() => {
-    navigator.mediaDevices.getUserMedia = async () => {
+    // Retain the fixture object across WebKit's navigation/GC lifecycle.
+    const devices = navigator.mediaDevices;
+    Object.defineProperty(navigator, "mediaDevices", { value: devices });
+    devices.getUserMedia = async () => {
       const c = document.createElement("canvas");
       c.width = 320;
       c.height = 180;

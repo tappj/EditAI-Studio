@@ -30,4 +30,4 @@ The source of truth is the sibling EditAI Swift app. Pure editorial prompts, ind
 - Source backups are opt-in and capped at 100 MB/file and 500 MB/account. A timeline synced without source backup needs the original browser's local media. This is disclosed in Settings and errors.
 - Native AI media-tool operations not advertised in `supportedOperations` are not emitted or silently treated as successful. Imported layers can be changed with their working manual controls.
 
-Real Publik AI verification and its testing boundaries are recorded in VERIFICATION.md. Publik catalog review, a final public authenticated session check, and physical camera/microphone and Safari/iOS-browser acceptance remain outstanding.
+Real Publik AI verification and its testing boundaries are recorded in VERIFICATION.md. The public authenticated AI/cloud-restore/export workflow and WebKit engine checks have passed. Publik catalog review, physical camera/microphone permissions, and an actual Safari/iPhone device check remain outstanding.

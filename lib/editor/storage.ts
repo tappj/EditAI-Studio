@@ -13,10 +13,86 @@ const db = () =>
     },
   });
 export const saveMedia = async (id: string, file: Blob) => {
-  await (await db()).put("media", file, scope + ":" + id);
+  const d = await db(),
+    root = scope + ":" + id;
+  const previous = await d.get("media", root);
+  try {
+    await d.put("media", file, root);
+  } catch (e: any) {
+    if (e.name === "QuotaExceededError")
+      throw Error(
+        "This browser's storage is full. Free some space or use a smaller video.",
+      );
+    if (
+      !["UnknownError", "DataCloneError"].includes(e.name) &&
+      !/blob|file data/i.test(e.message)
+    )
+      throw e;
+    // WebKit can decode a File yet reject persisting its Blob backing store.
+    // ArrayBuffer chunks avoid that path without reading the whole file at once.
+    const keys: string[] = [],
+      prefix = root + ":chunk:" + crypto.randomUUID() + ":";
+    try {
+      for (let offset = 0; offset < file.size; offset += 4 * 1024 * 1024) {
+        const key = prefix + keys.length;
+        keys.push(key);
+        await d.put(
+          "media",
+          await file.slice(offset, offset + 4 * 1024 * 1024).arrayBuffer(),
+          key,
+        );
+      }
+      await d.put(
+        "media",
+        {
+          format: "editai-media-chunks-v1",
+          type: file.type,
+          size: file.size,
+          keys,
+        },
+        root,
+      );
+    } catch (error) {
+      for (const key of keys) await d.delete("media", key);
+      throw error;
+    }
+  }
+  if (previous?.format === "editai-media-chunks-v1")
+    for (const key of previous.keys)
+      if (typeof key === "string" && key.startsWith(root + ":chunk:"))
+        await d.delete("media", key);
 };
-export const loadMedia = async (id: string): Promise<Blob | undefined> =>
-  (await db()).get("media", scope + ":" + id);
+export const loadMedia = async (id: string): Promise<Blob | undefined> => {
+  const d = await db(),
+    root = scope + ":" + id,
+    value = await d.get("media", root);
+  if (value == null || value instanceof Blob) return value;
+  if (
+    value.format !== "editai-media-chunks-v1" ||
+    !Array.isArray(value.keys) ||
+    value.keys.length > 256
+  )
+    throw Error(
+      "Saved media could not be read. Restore its original file or cloud backup.",
+    );
+  const chunks: ArrayBuffer[] = [];
+  for (const key of value.keys) {
+    if (typeof key !== "string" || !key.startsWith(root + ":chunk:"))
+      throw Error("Invalid saved media.");
+    const bytes = await d.get("media", key);
+    if (!(bytes instanceof ArrayBuffer))
+      throw Error(
+        "Saved media is incomplete. Restore its original file or cloud backup.",
+      );
+    chunks.push(bytes);
+  }
+  const file = new Blob(chunks, { type: value.type });
+  if (file.size !== value.size)
+    throw Error(
+      "Saved media is incomplete. Restore its original file or cloud backup.",
+    );
+  return file;
+};
 export const saveProject = async (p: Project) => {
   await (await db()).put("projects", { ...p, _owner: scope });
 };
@@ -33,7 +109,15 @@ export const deleteProject = async (id: string) => {
     (await listProjects()).flatMap((p) => p.document.sources.map((s) => s.id)),
   );
   for (const s of p.document.sources)
-    if (!used.has(s.id)) await d.delete("media", scope + ":" + s.id);
+    if (!used.has(s.id)) {
+      const root = scope + ":" + s.id,
+        media = await d.get("media", root);
+      if (media?.format === "editai-media-chunks-v1")
+        for (const key of media.keys)
+          if (typeof key === "string" && key.startsWith(root + ":chunk:"))
+            await d.delete("media", key);
+      await d.delete("media", root);
+    }
 };
 export const clearStorage = async () => {
   const d = await db();

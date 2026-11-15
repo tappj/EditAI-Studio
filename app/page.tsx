@@ -288,7 +288,13 @@ export default function App() {
   }, [theme, language, profileName]);
   useEffect(() => {
     if (session?.screen.id === "ready") return;
+    const started = Date.now();
     const id = setInterval(() => {
+      if (Date.now() - started >= 600000) {
+        clearInterval(id);
+        setGateError("Sign-in is still pending. Use Retry to check again.");
+        return;
+      }
       if (document.visibilityState === "visible") void refresh();
     }, 3000);
     return () => clearInterval(id);

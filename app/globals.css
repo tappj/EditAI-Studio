@@ -881,7 +881,7 @@ input[type="checkbox"] {
 .editor {
   display: flex;
   flex-direction: column;
-  flex: 1;
+  flex: 1 0 auto;
   min-height: 730px;
 }
 .editor-top {
@@ -913,9 +913,10 @@ input[type="checkbox"] {
 .editor-workspace {
   display: grid;
   grid-template-columns: 225px minmax(0, 1fr) 255px;
+  grid-template-rows: minmax(0, 1fr);
+  height: min(66vh, 800px);
   min-height: 440px;
-  max-height: 66vh;
-  flex: 1;
+  flex: 0 0 auto;
 }
 .editor-left {
   border-right: 1px solid var(--border);
@@ -1073,6 +1074,7 @@ input[type="checkbox"] {
   color: var(--muted);
 }
 .inspector {
+  min-height: 0;
   background: var(--bg);
   border-left: 1px solid var(--border);
   overflow: auto;
@@ -1944,6 +1946,8 @@ progress {
   }
   .editor-workspace {
     max-height: none;
+    height: auto;
+    grid-template-rows: auto;
   }
   .preview-area {
     min-height: 350px;

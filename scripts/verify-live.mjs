@@ -164,7 +164,14 @@ await page
   .fill(
     "Apply the Warm filter to every main clip. Keep all cuts and text unchanged.",
   );
+const chatResponse = page.waitForResponse(
+  (r) => r.url() === baseURL + "/api/ai/chat",
+  { timeout: 120000 },
+);
 await page.getByRole("button", { name: "Send message", exact: true }).click();
+const chatResult = await chatResponse;
+if (!chatResult.ok())
+  throw Error((await chatResult.json()).error || "Editor chat failed.");
 await page.locator(".message.assistant").waitFor({ timeout: 120000 });
 console.log(
   "Real Publik editor chat passed:",
