@@ -65,4 +65,6 @@ Final public-deployment regression: version 6 (app source `7ef1caf474237e5b9c6d1
 
 Added root MIT `LICENSE`, root `THIRD_PARTY_NOTICES.md`, the full GPL-2.0 license under `LICENSES/`, README licensing links and MIT package/lockfile metadata for the submitted public web repository. The existing `public/ffmpeg/NOTICE.txt` and GPL license remain intact. The MIT grant applies to EditAI-authored code; the `@ffmpeg/core@0.12.10` WebAssembly core retains GPL-2.0-or-later and its source/build notices. Hosted credentials remain server-side; no public desktop bootstrap resource was copied into the hosted web repository.
 
-Typecheck, all 15 model/security tests and the production build passed using the current shared dependency installation through an ignored local symlink. No application/editor or authentication behavior changed. Publik review acceptance remains external; adding repository license files alone is not a claim that the listing is live.
+Typecheck, all 15 model/security tests and the production build passed using the current shared dependency installation through a temporary local symlink (removed after validation). No application/editor or authentication behavior changed. Publik review acceptance remains external; adding repository license files alone is not a claim that the listing is live.
+
+GitHub's license API recognizes this repository as MIT. The documented Publik derive request confirms the existing `editai-studio` listing with `repo_already_listed` (409); no duplicate was submitted or claimed accepted.
