@@ -59,3 +59,10 @@ Playwright WebKit 27.2 is installed and used through `TEST_BROWSER=webkit`. WebK
 Ten browser checks pass locally in Chromium (17.9 seconds) and WebKit (28.4 seconds), including upload/edit/export, generated-camera recording, batch, captions/references, and a padded MP4 crossing the chunk boundary that survives a full reload and is completely removed on deletion. The generated camera fixture retains its MediaDevices object to survive WebKit's wrapper lifecycle. This validates WebKit engine behavior; physical camera/microphone permissions and an actual Safari/iPhone device check remain manual. The fixture suite does not make real AI calls.
 
 Final public-deployment regression: version 6 (app source `7ef1caf474237e5b9c6d12d7ffacd0f6818ab910`) passed all ten Chromium checks in 27.6 seconds and all ten WebKit checks in 38.8 seconds. The deployed harness now waits for the visible signed-in studio before setting hidden file inputs; this removes a test-only race with the asynchronous sign-in gate. No AI responses are mocked in the separate deployed real-AI verification above.
+
+
+## Publik open-source review corrections — November 16, 2026
+
+Added root MIT `LICENSE`, root `THIRD_PARTY_NOTICES.md`, the full GPL-2.0 license under `LICENSES/`, README licensing links and MIT package/lockfile metadata for the submitted public web repository. The existing `public/ffmpeg/NOTICE.txt` and GPL license remain intact. The MIT grant applies to EditAI-authored code; the `@ffmpeg/core@0.12.10` WebAssembly core retains GPL-2.0-or-later and its source/build notices. Hosted credentials remain server-side; no public desktop bootstrap resource was copied into the hosted web repository.
+
+Typecheck, all 15 model/security tests and the production build passed using the current shared dependency installation through an ignored local symlink. No application/editor or authentication behavior changed. Publik review acceptance remains external; adding repository license files alone is not a claim that the listing is live.

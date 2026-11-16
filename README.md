@@ -11,3 +11,11 @@ Node 22.13+: `npm ci`, `npm run dev`, `npm run typecheck`, `npm test`, `npm run 
 Runtime secrets: `PUBLIK_APP_TOKEN` and a base64 32-byte `SESSION_ENCRYPTION_KEY`, configured through hosting secret management. Never read existing environment files to recover credentials, place keys in browser variables, log them, or commit private browser test state. Do not rotate the encryption key without a credential migration. Visitor install/API keys are encrypted at rest; session cookies are HTTP-only.
 
 Read [feature parity](docs/WEB-PARITY.md), [actual verification and limits](docs/VERIFICATION.md), [domain/cost research](docs/DOMAINS-AND-COSTS.md), and [progress](plan.md). In particular, accounts whose Publik wallet lacks a public identity use browser-scoped persistence; source backups are optional; browser exports are re-encoded SDR; catalog review and physical camera/Safari checks remain outstanding.
+
+
+## License
+
+EditAI-authored code is available under the [MIT License](LICENSE). Bundled
+FFmpeg and other third-party components retain their own licenses, including
+the GPL. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the applicable
+notices, full license texts and source/build links.
